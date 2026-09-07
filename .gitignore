@@ -1,0 +1,10 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data (изображения + база метаданных)
+storage/

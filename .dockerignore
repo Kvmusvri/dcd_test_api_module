@@ -1,0 +1,10 @@
+.venv/
+storage/
+.env
+.git/
+__pycache__/
+*.pyc
+docs/
+AGENTS.md
+.impeccable.md
+opencode.json

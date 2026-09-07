@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dcd — стенд</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <div class="brand">dcd</div>
+      <div class="key-status" id="key-status" hidden>
+        <span class="dot"></span><span id="key-status-text"></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="composer">
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="Добавить картинки: перетащите или нажмите">
+        <p class="dz-primary">Перетащите картинки или нажмите, чтобы выбрать</p>
+        <p class="dz-hint">до 16 файлов · png, jpg, webp</p>
+        <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" multiple hidden>
+      </div>
+
+      <div class="previews" id="previews"></div>
+
+      <textarea id="prompt" rows="4"
+                placeholder="Опишите, что сделать с картинками"></textarea>
+
+      <div class="composer-row">
+        <select id="size" aria-label="Размер">
+          <option value="auto" selected>Размер: авто</option>
+          <option value="1024x1024">1024 × 1024</option>
+          <option value="1536x1024">1536 × 1024</option>
+          <option value="1024x1536">1024 × 1536</option>
+        </select>
+        <button class="btn" id="generate-btn" disabled>Сгенерировать</button>
+      </div>
+
+      <p class="error" id="gen-error" hidden></p>
+    </section>
+
+    <section class="results">
+      <p class="empty" id="results-empty">Результат появится здесь после генерации</p>
+      <div class="grid" id="results-grid"></div>
+    </section>
+
+    <section class="history" id="history" hidden>
+      <div class="dates" id="dates"></div>
+      <div class="day" id="day"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
