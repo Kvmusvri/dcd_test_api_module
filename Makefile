@@ -3,7 +3,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 SUDO := $(shell command -v sudo >/dev/null 2>&1 && echo sudo)
 
-.PHONY: help bootstrap setup dev up down restart logs rebuild report
+.PHONY: help bootstrap setup dev up down restart logs rebuild dedup report
 
 help:
 	@echo "make bootstrap - check/install required tools (docker, python3), fix permissions"
@@ -14,6 +14,7 @@ help:
 	@echo "make restart   - down + up"
 	@echo "make logs      - stream container logs (Ctrl+C to exit)"
 	@echo "make rebuild   - rebuild image without cache and start"
+	@echo "make dedup     - compact storage: replace duplicate copies with hardlinks"
 	@echo "make clean     - remove venv and python caches"
 
 bootstrap:
@@ -79,6 +80,9 @@ rebuild: bootstrap
 	docker compose up -d
 	@$(MAKE) --no-print-directory report
 
+dedup: setup
+	$(PY) -m app.dedup
+
 report:
 	@echo ""
 	@echo ">> Waiting for health check..."
@@ -96,7 +100,7 @@ report:
 		ports=$$(docker port dcd_test 2>/dev/null | tr '\n' ' '); \
 		echo ""; \
 		echo "  ==============================================="; \
-		echo "  Service : dcd-test (ChatGPT stand)"; \
+		echo "  Service : dcd-test (Higgsfield stand)"; \
 		echo "  Status  : $${health:-healthy (endpoint up)}"; \
 		echo "  Port    : 8100"; \
 		[ -n "$$ports" ] && echo "  Map     : $$ports"; \

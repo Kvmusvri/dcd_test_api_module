@@ -1,0 +1,61 @@
+# Промпт продуктового флоу оклейки. Хранится не в коде (бест-практис «prompts as code»):
+# редактируется здесь, версионируется в git, блоки склеиваются по порядку из order.
+# Язык блоков — английский (модели следуют английским инструкциям точнее).
+#
+# ПРИНЦИП (урок версий 3–8): промпт — АБСТРАКТНЫЙ ОБУЧАЮЩИЙ ПАТТЕРН.
+# Ноль слов, привязанных к конкретной фотографии или материалу: никаких цветов,
+# направлений света, зон кузова, типов сцены, названия финиша. Промпт только
+# ставит задачу и отправляет модель «учиться» на двух референсах — всё остальное
+# (цвета, блики, яркость, финиш, поведение по панелям) она обязана вывести сама.
+version: 9
+order: [task, learn, apply, constraints, output]
+blocks:
+  task: |
+    You receive three images:
+    1) CLIENT CAR — the car photo to edit.
+    2) MATERIAL SAMPLE — a sample of a wrapping material.
+    3) REFERENCE CAR — a different car fully covered in this same material.
+
+    Task: cover the painted body panels of the CLIENT CAR with this material.
+  learn: |
+    The MATERIAL SAMPLE and the REFERENCE CAR together are your only source of
+    truth about this material. Treat them as training examples: study how the
+    material behaves on every panel of the REFERENCE CAR — how its colour and
+    brightness change from panel to panel and from angle to angle, what it looks
+    like where light reaches a surface and where it does not, what each surface
+    shows back to the viewer, its finish, its texture and its exact level of
+    reflectance and sheen. Pay special attention to the finish AS IT LOOKS ON THE
+    REFERENCE CAR: how bright and sharp its reflections are, how much of the
+    surrounding environment is visible in them. Everything about how
+    the final result must look is demonstrated in these two photos. Do not assume,
+    invent or guess anything that is not demonstrated in them.
+  apply: |
+    Transfer the exact behaviour you learned onto the CLIENT CAR: picture this
+    material wrapped on this exact car, in this exact scene, under this exact
+    lighting and environment, every panel showing back what it would reflect or
+    absorb in that scene — and render the result. The material's behaviour stays
+    exactly as you learned it; only the car, its shape and its scene are new.
+
+    The finish of the new wrap must match the finish of the wrapped car on the
+    REFERENCE photos: the same reflectance and sheen, the same micro-texture of
+    the surface. Judge the finish by how the material reads on the reference
+    panels as a whole — do not copy any particular bright spot from the reference
+    photo.
+
+    IMPORTANT — where the highlights fall is decided ONLY by the CLIENT photo's
+    lighting and the car's geometry in that scene. Do NOT copy the positions of
+    highlights from the reference car: in the reference's own scene the light
+    falls differently, and its highlight positions belong to that scene, not this
+    one. If a panel is not lit in the client photo, it must stay in the film's
+    dark state even if the same panel carries a bright highlight on the reference
+    car; and every panel that IS lit in the client photo must show the film's
+    reflective sheen, no more and no less.
+  constraints: |
+    Strict constraints:
+    - Change ONLY the colour and material of the painted body panels.
+    - Do not change the camera angle, framing, crop, composition, perspective, background, environment, lighting, shadows or image quality in any way.
+    - Do not change glass, wheels, tyres, brakes, lights, grille, badges, number plates or any other details of the car.
+    - Do not add or remove objects.
+    - Everything outside the new wrap must remain identical to the client photo.
+  output: |
+    - Keep the exact aspect ratio and resolution of the CLIENT CAR photo.

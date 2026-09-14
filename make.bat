@@ -12,6 +12,7 @@ if /i "%TARGET%"=="down" goto down
 if /i "%TARGET%"=="restart" goto restart
 if /i "%TARGET%"=="logs" goto logs
 if /i "%TARGET%"=="rebuild" goto rebuild
+if /i "%TARGET%"=="dedup" goto dedup
 if /i "%TARGET%"=="clean" goto clean
 
 echo Unknown target: %TARGET%
@@ -77,6 +78,15 @@ if exist app\routers\__pycache__ rmdir /s /q app\routers\__pycache__
 echo ^>^> Cleaned.
 goto :eof
 
+:dedup
+call :ensure_env
+if not exist .venv\Scripts\python.exe (
+  echo [ERROR] No venv found. Run: make setup
+  exit /b 1
+)
+.venv\Scripts\python.exe -m app.dedup
+goto :eof
+
 :report
 echo.
 echo ^>^> Waiting for health check...
@@ -94,7 +104,7 @@ for /f %%H in ('docker inspect --format "{{.State.Health.Status}}" dcd_test 2^>n
 if "%HEALTH%"=="" set HEALTH=healthy (endpoint up)
 echo.
 echo   ==============================================
-echo   Service : dcd-test (ChatGPT stand)
+echo   Service : dcd-test (Higgsfield stand)
 echo   Status  : %HEALTH%
 echo   Port    : 8100
 for /f "tokens=*" %%P in ('docker port dcd_test 2^>nul') do echo   Map     : %%P
@@ -129,5 +139,6 @@ echo   down      - stop container
 echo   restart   - down + up
 echo   logs      - stream container logs (Ctrl+C to exit)
 echo   rebuild   - rebuild image without cache and start
+echo   dedup     - compact storage: replace duplicate copies with hardlinks
 echo   clean     - remove venv and python caches
 goto :eof

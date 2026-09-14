@@ -12,9 +12,9 @@ def history_dates():
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT date,
-                      SUM(direction = 'incoming') AS incoming,
-                      SUM(direction = 'outgoing') AS outgoing,
-                      COUNT(*) AS total
+                      COUNT(DISTINCT CASE WHEN direction = 'incoming' THEN hash END) AS incoming,
+                      COUNT(DISTINCT CASE WHEN direction = 'outgoing' THEN hash END) AS outgoing,
+                      COUNT(DISTINCT hash) AS total
                FROM images
                GROUP BY date
                ORDER BY date DESC"""
@@ -36,7 +36,18 @@ def history(date: str, direction: str | None = None):
 
     with get_conn() as conn:
         rows = conn.execute(query, params).fetchall()
-    return [dict(r) for r in rows]
+
+    # Несколько попыток с одними и теми же фото оставляют по строке на каждую
+    # попытку; в ленте дня показываем каждый уникальный контент один раз.
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for row in rows:
+        key = (row["direction"], row["hash"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return [dict(r) for r in unique]
 
 
 @router.get("/images/{image_id}/file")

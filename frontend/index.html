@@ -18,28 +18,38 @@
 
   <main class="wrap">
     <section class="composer">
-      <div class="dropzone" id="dropzone" tabindex="0" role="button"
-           aria-label="Добавить картинки: перетащите или нажмите">
-        <p class="dz-primary">Перетащите картинки или нажмите, чтобы выбрать</p>
-        <p class="dz-hint">до 16 файлов · png, jpg, webp</p>
-        <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" multiple hidden>
+      <div class="slots">
+        <div class="slot">
+          <span class="slot-name">Авто клиента</span>
+          <div class="slot-drop" data-slot="client_car" tabindex="0" role="button"
+               aria-label="Фото авто клиента: перетащите или нажмите">
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          </div>
+        </div>
+        <div class="slot">
+          <span class="slot-name">Плёнка</span>
+          <div class="slot-drop" data-slot="film" tabindex="0" role="button"
+               aria-label="Фото плёнки: перетащите или нажмите">
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          </div>
+        </div>
+        <div class="slot">
+          <span class="slot-name">Референс</span>
+          <div class="slot-drop" data-slot="reference" tabindex="0" role="button"
+               aria-label="Референсы оклейки: перетащите или нажмите">
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+          </div>
+        </div>
       </div>
 
-      <div class="previews" id="previews"></div>
-
-      <textarea id="prompt" rows="4"
-                placeholder="Опишите, что сделать с картинками"></textarea>
-
-      <div class="composer-row">
-        <select id="size" aria-label="Размер">
-          <option value="auto" selected>Размер: авто</option>
-          <option value="1024x1024">1024 × 1024</option>
-          <option value="1536x1024">1536 × 1024</option>
-          <option value="1024x1536">1024 × 1536</option>
-        </select>
-        <button class="btn" id="generate-btn" disabled>Сгенерировать</button>
-      </div>
-
+      <select id="model" class="model-select" aria-label="Модель"></select>
+      <select id="resolution" class="model-select" aria-label="Качество">
+        <option value="1K">1K — быстро</option>
+        <option value="2K" selected>2K — баланс</option>
+        <option value="4K">4K — максимум деталей</option>
+      </select>
+      <button class="btn" id="generate-btn" disabled>Сгенерировать</button>
+      <button class="btn btn-secondary" id="retry-btn" hidden>Повторить последнюю попытку</button>
       <p class="error" id="gen-error" hidden></p>
     </section>
 

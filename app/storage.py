@@ -97,12 +97,14 @@ def save_image(
 
 
 def _find_existing_file(file_hash: str) -> Path | None:
+    # Перебираем все записи с этим хешем: самая старая может быть удалена руками,
+    # а её жёсткие ссылки в других папках — живы.
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT rel_path FROM images WHERE hash = ? ORDER BY id LIMIT 1",
+        rows = conn.execute(
+            "SELECT rel_path FROM images WHERE hash = ? ORDER BY id",
             (file_hash,),
-        ).fetchone()
-    if row:
+        ).fetchall()
+    for row in rows:
         path = STORAGE_DIR / row["rel_path"]
         if path.exists():
             return path
