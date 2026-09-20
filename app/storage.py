@@ -44,6 +44,7 @@ def save_image(
     prompt: str | None = None,
     request_id: str | None = None,
     mime: str | None = None,
+    flow: str = "",
 ) -> dict:
     """Сохранить изображение с дедупликацией по SHA-256.
 
@@ -76,8 +77,8 @@ def save_image(
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO images (hash, rel_path, date, direction, ext, size, mime,
-                                   model, prompt, request_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   model, prompt, request_id, flow)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 file_hash,
                 rel_path.as_posix(),
@@ -89,6 +90,7 @@ def save_image(
                 model,
                 prompt,
                 request_id,
+                flow,
             ),
         )
         row = conn.execute("SELECT * FROM images WHERE id = ?", (cur.lastrowid,)).fetchone()

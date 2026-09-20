@@ -118,13 +118,13 @@ async def wrap(
     film: UploadFile,
     reference: list[UploadFile],
     model: str = Form(""),
-    resolution: str = Form("2K"),
 ):
     """Продуктовый флоу: авто клиента + плёнка + референсы (до 12) → авто в этой плёнке.
 
-    Ни цвета, ни финиш, ни модель авто не хардкодятся — всё модель извлекает из фото.
-    Клиентское фото не меняется ни в чём, кроме оклейки; результат отдаётся в размере
-    клиентского фото.
+    Ни цвета, ни финиш, ни модель авто, ни разрешение не хардкодятся и не
+    выбираются руками: разрешение и пропорции считаются ТОЛЬКО по клиентскому
+    фото. Клиентское фото не меняется ни в чём, кроме оклейки; результат
+    отдаётся в размере клиентского фото.
     """
     _get_token()
     if model and model not in SUPPORTED_SLUGS:
@@ -159,19 +159,35 @@ async def wrap(
         sum(len(d) // 1024 for role, _m, d in contents if role == "reference"),
     )
     for _role, mime, data in contents:
-        save_image(data, "incoming", model=effective_model, prompt=wrap_prompt, request_id=request_id, mime=mime)
+        save_image(
+            data, "incoming", model=effective_model, prompt=wrap_prompt,
+            request_id=request_id, mime=mime, flow="wrap",
+        )
 
     # Порядок входов соответствует промпту: клиент, плёнка, референс(ы).
     client_size = _image_size(contents[0][2])
+    # Разрешение — ТОЛЬКО по клиентскому фото (руками не выбирается):
+    # незачем генерить 4K для фото 1200px и бессмысленно просить 2K для 4K-фото.
+    wrap_resolution = _auto_resolution(client_size)
+    # Пропорции задаём ЯВНО из клиентского фото: match_input_image при
+    # мультивходе NB2 берёт пропорции непредсказуемо (2026-09-19: на 4:3
+    # клиента вернулся портрет 1792x2400, кроп до клиентских пропорций срезал
+    # бампер). Ближайший ratio из enum модели — детерминирован.
+    wrap_aspect = _closest_ratio(client_size) or "auto"
+    logger.info(
+        "wrap: resolution=%s, aspect_ratio=%s (client photo %s)",
+        wrap_resolution, wrap_aspect, client_size,
+    )
 
     outgoing_ids = await _run_job(
         request_id,
         wrap_prompt,
-        "auto",
+        wrap_aspect,
         [(mime, data) for _role, mime, data in contents],
         model=effective_model,
-        resolution=resolution,
+        resolution=wrap_resolution,
         target_size=client_size,
+        flow="wrap",
     )
 
     return {
@@ -199,12 +215,17 @@ def last():
 
 @router.post("/replicate/retry/{request_id}")
 async def retry(request_id: str):
-    """Повторить попытку по сохранённым входным фото — без повторной загрузки."""
+    """Повторить попытку по сохранённым входным фото — без повторной загрузки.
+
+    Wrap-флоу: те же фото + ТЕКУЩИЙ промпт из wrap.yaml + разрешение и
+    пропорции по клиентскому фото (авто). Модель — как в исходной попытке.
+    Свободный режим повторяет сохранённый промпт.
+    """
     _get_token()
 
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT rel_path, mime, prompt, model FROM images "
+            "SELECT rel_path, mime, prompt, model, flow FROM images "
             "WHERE request_id = ? AND direction = 'incoming' ORDER BY id",
             (request_id,),
         ).fetchall()
@@ -220,18 +241,40 @@ async def retry(request_id: str):
             raise HTTPException(status_code=404, detail=f"Файл {row['rel_path']} отсутствует в хранилище")
         contents.append((row["mime"], path.read_bytes()))
 
+    # Wrap-попытка определяется флагом flow из БД (старые строки до колонки
+    # размечены миграцией по префиксу промпта). Промпт для wrap — ВСЕГДА
+    # текущий из wrap.yaml: «Повторить» в продукте означает «те же фото с
+    # актуальными настройками»; повтор со старым промптом обесценивал бы
+    # кнопку после каждой правки промпта. Разрешение и пропорции — тем же
+    # авто-правилом, что и в wrap: только по клиентскому фото. Модель —
+    # как в исходной попытке (осознанный выбор той генерации).
     wrap_prompt = get_flow_prompt("wrap")
-    prompt = rows[0]["prompt"] or wrap_prompt
+    stored_prompt = rows[0]["prompt"] or ""
     model = rows[0]["model"] or REPLICATE_MODEL
-    target_size = _image_size(contents[0][1]) if prompt == wrap_prompt else None
+    is_wrap = bool(rows[0]["flow"])
+    prompt = wrap_prompt if is_wrap else (stored_prompt or wrap_prompt)
+
+    target_size = _image_size(contents[0][1]) if is_wrap else None
+    retry_resolution = _auto_resolution(target_size) if is_wrap else ""
+    retry_aspect = (_closest_ratio(target_size) or "auto") if is_wrap else "auto"
 
     new_request_id_value = new_request_id()
-    logger.info("retry: %s -> %s, %d input(s), model=%s", request_id, new_request_id_value, len(contents), model)
+    logger.info(
+        "retry: %s -> %s, %d input(s), model=%s, wrap=%s",
+        request_id, new_request_id_value, len(contents), model, is_wrap,
+    )
     # Входные строки в БД НЕ дублируем: попытка ссылается на те же фото,
     # в истории новая попытка покажется только результатом.
 
     outgoing_ids = await _run_job(
-        new_request_id_value, prompt, "auto", contents, model=model, resolution="2K", target_size=target_size
+        new_request_id_value,
+        prompt,
+        retry_aspect,
+        contents,
+        model=model,
+        resolution=retry_resolution,
+        target_size=target_size,
+        flow="wrap" if is_wrap else "",
     )
 
     return {
@@ -261,6 +304,7 @@ def requests_history(limit: int = 50):
 
 async def _upload_input(content_type: str | None, data: bytes) -> str:
     """Загрузка входной картинки через Files API Replicate, возвращает URL для input."""
+    data = _normalize_orientation(data)
     normalized = "image/jpeg" if content_type == "image/jpg" else (content_type or "image/png")
     filename = "input." + normalized.split("/")[1]
 
@@ -293,6 +337,7 @@ async def _run_job(
     model: str = REPLICATE_MODEL,
     resolution: str = "",
     target_size: tuple[int, int] | None = None,
+    flow: str = "",
 ) -> list[int]:
     """Загрузить входные, сабмитнуть модель, дождаться результата, сохранить."""
     reference_urls = []
@@ -361,7 +406,7 @@ async def _run_job(
         logger.warning("provider canceled: %s", detail)
         raise HTTPException(status_code=502, detail=detail)
 
-    return await _save_outputs(payload, request_id, prompt, model, provider_request_id, target_size)
+    return await _save_outputs(payload, request_id, prompt, model, provider_request_id, target_size, flow)
 
 
 async def _submit(model: str, model_input: dict, request_id: str) -> dict:
@@ -402,6 +447,7 @@ async def _save_outputs(
     model: str,
     provider_request_id: str | None,
     target_size: tuple[int, int] | None = None,
+    flow: str = "",
 ) -> list[int]:
     outputs = final.get("output") or []
     if isinstance(outputs, str):
@@ -433,6 +479,7 @@ async def _save_outputs(
                 prompt=prompt,
                 request_id=request_id,
                 mime="image/png",
+                flow=flow,
             )
             logger.info(
                 "outgoing saved: id=%s, %dKB%s",
@@ -455,7 +502,11 @@ def _decode_data_uri(uri: str) -> bytes | None:
 
 
 def _closest_ratio(size: tuple[int, int] | None) -> str | None:
-    """Ближайший из стандартных форматов к пропорциям клиентского фото (запасной путь)."""
+    """Ближайший из форматов enum модели к пропорциям клиентского фото.
+
+    Основной путь wrap-флоу: явный ratio надёжнее match_input_image,
+    который при мультивходе берёт пропорции непредсказуемо.
+    """
     if not size:
         return None
     width, height = size
@@ -475,18 +526,80 @@ def _image_size(data: bytes) -> tuple[int, int] | None:
 
 def _match_size(data: bytes, target: tuple[int, int] | None) -> bytes:
     # Требование флоу оклейки: выход обязан совпадать с размером клиентского фото.
+    # Пропорции не совпали — сначала центр-кроп до целевых (растяжение искажает
+    # геометрию авто), апскейл сильнее 2x бессмыслен — оставляем разрешение модели.
     if target is None:
         return data
     try:
         with Image.open(io.BytesIO(data)) as img:
             if img.size == target:
                 return data
-            resized = img.resize(target, Image.LANCZOS)
+            out_w, out_h = img.size
+            tgt_w, tgt_h = target
+            out_ratio, tgt_ratio = out_w / out_h, tgt_w / tgt_h
+            if abs(out_ratio - tgt_ratio) / tgt_ratio > 0.01:
+                if out_ratio > tgt_ratio:
+                    new_w = round(out_h * tgt_ratio)
+                    left = (out_w - new_w) // 2
+                    img = img.crop((left, 0, left + new_w, out_h))
+                else:
+                    new_h = round(out_w / tgt_ratio)
+                    top = (out_h - new_h) // 2
+                    img = img.crop((0, top, out_w, top + new_h))
+                logger.warning("output %dx%d cropped to client aspect %dx%d", out_w, out_h, img.size[0], img.size[1])
+            if tgt_w > img.size[0] * 2 or tgt_h > img.size[1] * 2:
+                logger.warning(
+                    "client photo %dx%d is >2x the model output %dx%d — keeping model resolution",
+                    tgt_w, tgt_h, *img.size,
+                )
+                img = img.copy()
+                buffer = io.BytesIO()
+                img.save(buffer, format="PNG")
+                return buffer.getvalue()
+            if img.size != target:
+                img = img.resize(target, Image.LANCZOS)
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG")
+            return buffer.getvalue()
+    except Exception:
+        return data
+
+
+def _normalize_orientation(data: bytes) -> bytes:
+    """Модель видит «сырые» пиксели без EXIF: фото с тегом Orientation приедет боком.
+
+    Пересобираем такие файлы до загрузки (ориентация применяется, EXIF
+    сбрасывается); файлы без поворота уходят байт-в-байт, без пережатия.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if (img.getexif().get(0x0112) or 1) == 1:
+                return data
+            fmt = img.format or "JPEG"
+            fixed = ImageOps.exif_transpose(img)
         buffer = io.BytesIO()
-        resized.save(buffer, format="PNG")
+        save_kwargs = {"quality": 95} if fmt == "JPEG" else {}
+        fixed.save(buffer, format=fmt, **save_kwargs)
+        logger.info("input re-encoded: EXIF orientation applied, fmt=%s", fmt)
         return buffer.getvalue()
     except Exception:
         return data
+
+
+def _auto_resolution(client_size: tuple[int, int] | None) -> str:
+    """Разрешение модели ТОЛЬКО по размеру клиентского фото (ручной выбор убран).
+
+    Длинная сторона > 2048 → 4K, > 1024 → 2K, иначе 1K: генерируем не крупнее
+    необходимого (меньше 2K всё равно растянется до клиента и потеряет резкость,
+    1K достаточен для мелких фото). Размер не читается — консервативный 2K.
+    """
+    if not client_size:
+        return "2K"
+    if max(client_size) > 2048:
+        return "4K"
+    if max(client_size) > 1024:
+        return "2K"
+    return "1K"
 
 
 def _error_text(resp: httpx.Response) -> str:

@@ -5,30 +5,98 @@
 # ПРИНЦИП (урок версий 3–8): промпт — АБСТРАКТНЫЙ ОБУЧАЮЩИЙ ПАТТЕРН.
 # Ноль слов, привязанных к конкретной фотографии или материалу: никаких цветов,
 # направлений света, зон кузова, типов сцены, названия финиша. Промпт только
-# ставит задачу и отправляет модель «учиться» на двух референсах — всё остальное
+# ставит задачу и отправляет модель «учиться» на референсах — всё остальное
 # (цвета, блики, яркость, финиш, поведение по панелям) она обязана вывести сама.
-version: 9
+#
+# Урок v11 → v12 (тест 2026-09-17, красный Tank + студийные референсы SK7008):
+# 1) модель взяла оттенок плёнки из СТУДИЙНОГО света референсов (гексагональные
+#    потолочные лампы) — цвет ушёл в холодный; v12: цветные отблески сцены
+#    референса — НЕ цвет материала;
+# 2) модель скопировала узор потолочных ламп из отражений референсов на СТЕКЛО
+#    клиентской машины; v12: отражения на всех поверхностях считаются только из
+#    сцены клиента, светильники/узоры/предметы из отражений референса переносить
+#    запрещено;
+# 3) выход был мягким/замыленным, геометрия кузова «поплыла»; v12: фотореализм,
+#    максимальная резкость, геометрия и линии кузова без перерисовки.
+#
+# Урок v12 → v13 (тест 2026-09-19, снова красные SK7008-фото): тон уехал в
+# РУБИНОВЫЙ — темнее и насыщеннее плёнки. Диагноз и лечение:
+# 1) абстрактное «истинный цвет при нейтральном белом свете» (v12) модель
+#    понимает как разрешение ВЫБРАТЬ цвет — и идеализирует его в более тёмный
+#    и насыщенный. v13 заменяет абстракцию конкретным источником: цвет =
+#    большие РОВНО ОСВЕЩЁННЫЕ участки материала; блик и глубокая тень цветом
+#    не считаются (блик зеркалит сцену); при споре фото побеждает дневной свет;
+# 2) у клиента КРАСНАЯ база — модель смешивала краску клиента с плёнкой
+#    (красный × красный = темнее → рубин). v13: плёнка ПОЛНОСТЬЮ заменяет
+#    краску, цвет базы не влияет и не просвечивает — каждая панель = непрозрачный
+#    лист материала;
+# 3) добавлена самопроверка цвета «чипом» (по образцу сработавшей самопроверки
+#    финиша v10): чип с готовых панелей должен быть взаимозаменяем с чипом
+#    ровно освещённых участков образца;
+# 4) task учитывает реальность слота «плёнка»: туда грузят и свотч, и фото
+#    машины в этой плёнке; референсов может быть несколько.
+#
+# Урок v13 → v14 (тест 2026-09-19 вечером, NB2 2K + 12 референсов): тон
+# перелетел в СВЕТЛЫЙ/розовый, на бампер клиента приехала надпись «SKINCARS»
+# с фото вендора, NB2 вернул портретный кадр вместо 4:3 (лечится пайплайном:
+# явный aspect_ratio). Диагноз и лечение:
+# 1) запреты v13 были ОДНОСТОРОННИМИ («не темни, не перенасыщай») — модель
+#    честно выполнила их в светлую сторону. v14: замок цвета СИММЕТРИЧЕН —
+#    «не темнее и не светлее, не насыщеннее и не бледнее, без сдвига тона
+#    в любую сторону», и самопроверка «чипом» симметрична;
+# 2) переносы надписей/логотипов/водяных знаков с референсов не были
+#    запрещены — добавлен запрет в constraints (свои номера/шильдики клиента
+#    не трогаются).
+#
+# Урок v14 → v15 (тест 2026-09-19 ночь, retry NB2): на свету панели попали в
+# цвет (симметричный замок сработал), но ТЕНЕВЫЕ панели ушли в винный/тёмный.
+# Виновата фраза v11 «unlit panel = film's dark state» — хардкод поведения в
+# тени, оставшийся от тёмной плёнки. По факту (Лев, SK7008): плёнка держит
+# тон и в тени. v15: поведение в тени УЧИТСЯ с референсов — если референсы
+# показывают тот же цвет в тени (чуть темнее), рендерим так же; тень не
+# превращает материал в другой, более глубокий цвет. Хардкод «dark state»
+# удалён. Пайплайн того же дня: resolution только авто по клиентскому фото
+# (селект качества убран из UI), retry распознаёт wrap по колонке flow в БД
+# (сравнение текста промпта ломалось при каждой правке wrap.yaml).
+version: 15
 order: [task, learn, apply, constraints, output]
 blocks:
   task: |
-    You receive three images:
+    You receive the following images:
     1) CLIENT CAR — the car photo to edit.
-    2) MATERIAL SAMPLE — a sample of a wrapping material.
-    3) REFERENCE CAR — a different car fully covered in this same material.
+    2) MATERIAL SAMPLE — the wrapping material: a flat swatch, or the same
+    material photographed on a car.
+    3) REFERENCE — one or more photos of other cars fully covered in this
+    same material.
 
     Task: cover the painted body panels of the CLIENT CAR with this material.
   learn: |
-    The MATERIAL SAMPLE and the REFERENCE CAR together are your only source of
-    truth about this material. Treat them as training examples: study how the
-    material behaves on every panel of the REFERENCE CAR — how its colour and
-    brightness change from panel to panel and from angle to angle, what it looks
-    like where light reaches a surface and where it does not, what each surface
-    shows back to the viewer, its finish, its texture and its exact level of
-    reflectance and sheen. Pay special attention to the finish AS IT LOOKS ON THE
-    REFERENCE CAR: how bright and sharp its reflections are, how much of the
-    surrounding environment is visible in them. Everything about how
-    the final result must look is demonstrated in these two photos. Do not assume,
-    invent or guess anything that is not demonstrated in them.
+    The MATERIAL SAMPLE and the REFERENCE photos together are your only source
+    of truth about this material. Treat them as training examples: study how
+    the material behaves on every panel of the reference cars — how its colour
+    and brightness change from panel to panel and from angle to angle, what it
+    looks like where light reaches a surface and where it does not, what each
+    surface shows back to the viewer, its finish, its texture and its exact
+    level of reflectance and sheen. Pay special attention to the finish AS IT
+    LOOKS ON THE REFERENCE CARS: how bright and sharp its reflections are, how
+    much of the surrounding environment is visible in them. Everything about
+    how the final result must look is demonstrated in these photos. Do not
+    assume, invent or guess anything that is not demonstrated in them.
+
+    Determine the material's TRUE colour only from real colour evidence:
+    - The colour of the material is what its LARGE areas in soft, even light
+      show.
+    - Bright reflection spots are NOT colour evidence: they mirror that
+      scene's own lights and surroundings.
+    - Deep shadow is not colour evidence either.
+    - A coloured ambient glow of a scene — studio lamps, tinted illumination,
+      sunset or shade light — belongs to THAT scene, not to the material.
+    - If the photos disagree about the colour, the ones taken outdoors in
+      broad daylight are the closest to the true colour; studio photos
+      demonstrate the finish and per-panel behaviour, not the colour.
+    - How the material behaves in shadow is part of the material as well:
+      check on the reference cars whether its colour holds in shade or
+      deepens — and reproduce exactly that behaviour in shadow.
   apply: |
     Transfer the exact behaviour you learned onto the CLIENT CAR: picture this
     material wrapped on this exact car, in this exact scene, under this exact
@@ -36,26 +104,66 @@ blocks:
     absorb in that scene — and render the result. The material's behaviour stays
     exactly as you learned it; only the car, its shape and its scene are new.
 
-    The finish of the new wrap must match the finish of the wrapped car on the
+    The wrap REPLACES the paint completely. The CLIENT CAR's original paint
+    colour must have zero influence on the result: every painted panel becomes
+    an opaque sheet of this material showing exactly the colour you determined
+    — the same hue, the same lightness and the same saturation as the
+    material's evenly lit areas: no darker and no lighter, no more and no less
+    saturated, with no hue shift in any direction. The client car's own paint
+    must not blend with, tint or show through the material in any way.
+
+    Every reflection on every surface of the CLIENT CAR is computed from the
+    CLIENT photo's scene only: its sky, its ground, its surroundings, its light
+    sources. The reflections visible in the reference photos contain THAT
+    scene's own ceiling lights, fixtures and objects — light patterns, lamp
+    shapes, walls, equipment. They belong to the reference scene and must never
+    be reproduced on the client car: no shape, pattern or glowing outline from
+    the reference reflections may appear on any panel, glass or wheel of the
+    CLIENT CAR.
+
+    The finish of the new wrap must match the finish of the wrapped cars on the
     REFERENCE photos: the same reflectance and sheen, the same micro-texture of
     the surface. Judge the finish by how the material reads on the reference
-    panels as a whole — do not copy any particular bright spot from the reference
-    photo.
+    panels as a whole — do not copy any particular bright spot from the
+    reference photo.
 
     IMPORTANT — where the highlights fall is decided ONLY by the CLIENT photo's
     lighting and the car's geometry in that scene. Do NOT copy the positions of
-    highlights from the reference car: in the reference's own scene the light
-    falls differently, and its highlight positions belong to that scene, not this
-    one. If a panel is not lit in the client photo, it must stay in the film's
-    dark state even if the same panel carries a bright highlight on the reference
-    car; and every panel that IS lit in the client photo must show the film's
-    reflective sheen, no more and no less.
+    highlights from the reference cars: in the reference's own scene the light
+    falls differently, and its highlight positions belong to that scene, not
+    this one. A panel that is not lit in the client photo must not borrow a
+    bright highlight from a reference car; a panel that IS lit in the client
+    photo must show the film's reflective sheen, no more and no less.
+
+    How the material behaves in SHADOW you also learn from the reference
+    photos — never assume it. If the reference cars show the material holding
+    its colour on shadowed panels — the same hue, only slightly darker — then
+    every shadowed panel of the CLIENT CAR must show exactly that: the same
+    colour, only slightly darker, never a different, deeper colour.
+
+    Before rendering, check the colour: a paint chip taken from the wrapped
+    panels of your result must be interchangeable with a chip taken from the
+    material's evenly lit areas in the sample and reference photos. If the two
+    chips differ in hue, in lightness or in saturation, correct your colour to
+    match the material exactly — in either direction.
   constraints: |
     Strict constraints:
     - Change ONLY the colour and material of the painted body panels.
+    - Glass of every kind — windshield, windows, rear glass, headlight and
+      taillight covers — must remain EXACTLY as in the client photo: same tint,
+      same transparency, same reflections. Draw nothing new on glass.
+    - Do not redraw, reshape, warp or smooth any part of the car: body lines,
+      panel gaps, trim, mirrors, wheels, tyres, brakes, grille, badges, number
+      plates and every other detail stay pixel-faithful to the client photo.
+    - Do not transfer any text, lettering, logos or watermarks visible in the
+      sample or reference photos onto the client car. The client photo's own
+      number plates, badges and lettering stay exactly as they are.
     - Do not change the camera angle, framing, crop, composition, perspective, background, environment, lighting, shadows or image quality in any way.
-    - Do not change glass, wheels, tyres, brakes, lights, grille, badges, number plates or any other details of the car.
     - Do not add or remove objects.
     - Everything outside the new wrap must remain identical to the client photo.
   output: |
+    - Render a photorealistic photograph of the highest sharpness and detail:
+      crisp edges, natural micro-texture of the material, no blur, no smoothing,
+      no painterly or plastic look. The result must be indistinguishable from a
+      real photo taken with the same camera as the client photo.
     - Keep the exact aspect ratio and resolution of the CLIENT CAR photo.
