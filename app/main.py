@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, PORT
 from app.db import init_db
-from app.routers import images, replicate
+from app.routers import color, images, replicate
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 LOG_DIR = BASE_DIR / "storage" / "logs"
@@ -53,6 +53,7 @@ app = FastAPI(title="dcd_test_module", docs_url="/api/docs", redoc_url=None, lif
 
 app.include_router(images.router, prefix="/api")
 app.include_router(replicate.router, prefix="/api")
+app.include_router(color.router, prefix="/api")
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")
 

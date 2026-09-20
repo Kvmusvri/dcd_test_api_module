@@ -6,3 +6,4 @@ python-multipart>=0.0.9
 aiofiles>=24.1
 pillow>=10.4
 pyyaml>=6.0
+numpy>=1.26

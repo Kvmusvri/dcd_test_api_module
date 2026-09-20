@@ -17,7 +17,12 @@
   </header>
 
   <main class="wrap">
-    <section class="composer">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="wrap" role="tab" aria-selected="true">Оклейка</button>
+      <button class="tab" data-tab="color" role="tab" aria-selected="false">Колористика</button>
+    </nav>
+
+    <section class="composer" data-panel="wrap">
       <div class="slots">
         <div class="slot">
           <span class="slot-name">Авто клиента</span>
@@ -43,24 +48,47 @@
       </div>
 
       <select id="model" class="model-select" aria-label="Модель"></select>
-      <select id="resolution" class="model-select" aria-label="Качество">
-        <option value="1K">1K — быстро</option>
-        <option value="2K" selected>2K — баланс</option>
-        <option value="4K">4K — максимум деталей</option>
-      </select>
       <button class="btn" id="generate-btn" disabled>Сгенерировать</button>
       <button class="btn btn-secondary" id="retry-btn" hidden>Повторить последнюю попытку</button>
+      <p class="hint" id="client-hint" hidden></p>
       <p class="error" id="gen-error" hidden></p>
     </section>
 
-    <section class="results">
+    <section class="results" data-panel="wrap">
       <p class="empty" id="results-empty">Результат появится здесь после генерации</p>
       <div class="grid" id="results-grid"></div>
     </section>
 
-    <section class="history" id="history" hidden>
+    <section class="history" id="history" data-panel="wrap" hidden>
       <div class="dates" id="dates"></div>
       <div class="day" id="day"></div>
+    </section>
+
+    <section class="color-tool" data-panel="color" hidden>
+      <p class="color-note">
+        Загрузи два фото — генерацию и референс. Стенд сам найдёт кузов (ROI по цвету),
+        соберёт квадратик-градиент «тень → свет» и посчитает ΔE2000 — объективную
+        разницу цвета, без «на глаз».
+      </p>
+      <div class="slots">
+        <div class="slot">
+          <span class="slot-name">Генерация</span>
+          <div class="slot-drop" data-cslot="left" tabindex="0" role="button"
+               aria-label="Фото генерации: перетащите или нажмите">
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          </div>
+        </div>
+        <div class="slot">
+          <span class="slot-name">Референс</span>
+          <div class="slot-drop" data-cslot="right" tabindex="0" role="button"
+               aria-label="Фото референса: перетащите или нажмите">
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          </div>
+        </div>
+      </div>
+      <button class="btn" id="color-btn" disabled>Сравнить цвета</button>
+      <p class="error" id="color-error" hidden></p>
+      <div class="color-result" id="color-result" hidden></div>
     </section>
   </main>
 
