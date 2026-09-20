@@ -104,7 +104,7 @@ for /f %%H in ('docker inspect --format "{{.State.Health.Status}}" dcd_test 2^>n
 if "%HEALTH%"=="" set HEALTH=healthy (endpoint up)
 echo.
 echo   ==============================================
-echo   Service : dcd-test (Higgsfield stand)
+echo   Service : dcd-test (Replicate stand)
 echo   Status  : %HEALTH%
 echo   Port    : 8100
 for /f "tokens=*" %%P in ('docker port dcd_test 2^>nul') do echo   Map     : %%P

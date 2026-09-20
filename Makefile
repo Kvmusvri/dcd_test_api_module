@@ -100,7 +100,7 @@ report:
 		ports=$$(docker port dcd_test 2>/dev/null | tr '\n' ' '); \
 		echo ""; \
 		echo "  ==============================================="; \
-		echo "  Service : dcd-test (Higgsfield stand)"; \
+		echo "  Service : dcd-test (Replicate stand)"; \
 		echo "  Status  : $${health:-healthy (endpoint up)}"; \
 		echo "  Port    : 8100"; \
 		[ -n "$$ports" ] && echo "  Map     : $$ports"; \
