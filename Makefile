@@ -3,7 +3,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 SUDO := $(shell command -v sudo >/dev/null 2>&1 && echo sudo)
 
-.PHONY: help bootstrap setup dev up down restart logs rebuild dedup report
+.PHONY: help bootstrap setup dev up down restart logs rebuild dedup report models
 
 help:
 	@echo "make bootstrap - check/install required tools (docker, python3), fix permissions"
@@ -15,7 +15,23 @@ help:
 	@echo "make logs      - stream container logs (Ctrl+C to exit)"
 	@echo "make rebuild   - rebuild image without cache and start"
 	@echo "make dedup     - compact storage: replace duplicate copies with hardlinks"
+	@echo "make models    - download u2net.onnx (176MB) for color comparator segmentation"
 	@echo "make clean     - remove venv and python caches"
+
+U2NET_URL := https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+U2NET_FILE := app/vision/models/u2net.onnx
+
+models:
+	@mkdir -p app/vision/models
+	@if [ -f "$(U2NET_FILE)" ]; then \
+		echo ">> $(U2NET_FILE) уже скачан."; \
+	else \
+		echo ">> Downloading u2net.onnx (~176MB)..."; \
+		curl -L --fail -o "$(U2NET_FILE)" "$(U2NET_URL)" || { rm -f "$(U2NET_FILE)"; echo "[ERROR] Download failed"; exit 1; }; \
+		sha256sum "$(U2NET_FILE)"; \
+		echo ">> Запиши хеш выше в docs/knowledge/vision-raytracing.md (чек-лист весов)."; \
+	fi
+	@echo ">> Веса intrinsic (~1.5GB) качаются автоматически при первом запросе в storage/torch_hub."
 
 bootstrap:
 	@echo ">> Checking required tools..."
@@ -60,14 +76,14 @@ setup: bootstrap
 dev: setup
 	$(PY) -m uvicorn app.main:app --reload --port 8100
 
-up: bootstrap
+up: bootstrap models
 	docker compose up -d --build
 	@$(MAKE) --no-print-directory report
 
 down:
 	docker compose down
 
-restart:
+restart: models
 	docker compose down
 	docker compose up -d --build
 	@$(MAKE) --no-print-directory report
@@ -75,8 +91,8 @@ restart:
 logs:
 	docker logs -f dcd_test
 
-rebuild: bootstrap
-	docker compose build --no-cache
+rebuild: bootstrap models
+	docker compose build
 	docker compose up -d
 	@$(MAKE) --no-print-directory report
 

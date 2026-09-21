@@ -13,6 +13,7 @@ if /i "%TARGET%"=="restart" goto restart
 if /i "%TARGET%"=="logs" goto logs
 if /i "%TARGET%"=="rebuild" goto rebuild
 if /i "%TARGET%"=="dedup" goto dedup
+if /i "%TARGET%"=="models" goto models
 if /i "%TARGET%"=="clean" goto clean
 
 echo Unknown target: %TARGET%
@@ -41,8 +42,13 @@ goto :eof
 
 :up
 call :ensure_env
+call :ensure_models
 echo ^>^> docker compose up -d --build
 docker compose up -d --build
+if errorlevel 1 (
+  echo [ERROR] Build/up failed. See error above.
+  exit /b 1
+)
 call :report
 goto :eof
 
@@ -53,6 +59,7 @@ goto :eof
 
 :restart
 call :ensure_env
+call :ensure_models
 docker compose down
 docker compose up -d --build
 call :report
@@ -65,8 +72,13 @@ goto :eof
 
 :rebuild
 call :ensure_env
-echo ^>^> Rebuilding without cache...
-docker compose build --no-cache
+call :ensure_models
+echo ^>^> Rebuilding (incremental, cache used)...
+docker compose build
+if errorlevel 1 (
+  echo [ERROR] Build failed. Container NOT restarted - old one keeps running.
+  exit /b 1
+)
 docker compose up -d
 call :report
 goto :eof
@@ -75,6 +87,8 @@ goto :eof
 if exist .venv rmdir /s /q .venv
 if exist app\__pycache__ rmdir /s /q app\__pycache__
 if exist app\routers\__pycache__ rmdir /s /q app\routers\__pycache__
+if exist app\services\__pycache__ rmdir /s /q app\services\__pycache__
+if exist app\vision\__pycache__ rmdir /s /q app\vision\__pycache__
 echo ^>^> Cleaned.
 goto :eof
 
@@ -85,6 +99,28 @@ if not exist .venv\Scripts\python.exe (
   exit /b 1
 )
 .venv\Scripts\python.exe -m app.dedup
+goto :eof
+
+:models
+call :ensure_models
+goto :eof
+
+:ensure_models
+call :ensure_u2net
+goto :eof
+
+:ensure_u2net
+if exist app\vision\models\u2net.onnx goto :eof
+if not exist app\vision\models mkdir app\vision\models
+echo ^>^> Downloading u2net.onnx (~176MB, one-time)...
+curl -L --fail -o app\vision\models\u2net.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+if errorlevel 1 (
+  del app\vision\models\u2net.onnx 2>nul
+  echo [ERROR] Download failed. Fix network and rerun make rebuild
+  exit /b 1
+)
+certutil -hashfile app\vision\models\u2net.onnx SHA256
+echo ^>^> Write the SHA256 above into docs\knowledge\vision-raytracing.md
 goto :eof
 
 :report
@@ -134,11 +170,12 @@ echo.
 echo   bootstrap - check that docker is available
 echo   setup     - create venv and install dependencies
 echo   dev       - run dev server (uvicorn, port 8100)
-echo   up        - build and start docker container
+echo   up        - build and start docker container (auto-downloads u2net weights)
 echo   down      - stop container
 echo   restart   - down + up
 echo   logs      - stream container logs (Ctrl+C to exit)
-echo   rebuild   - rebuild image without cache and start
+echo   rebuild   - rebuild image without cache and start (auto-downloads weights)
 echo   dedup     - compact storage: replace duplicate copies with hardlinks
+echo   models    - download u2net.onnx only (auto-skipped when already present)
 echo   clean     - remove venv and python caches
 goto :eof

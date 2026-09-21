@@ -443,6 +443,43 @@ body {
   background: var(--fill-2);
 }
 
+.vision-maps {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+}
+
+.vision-map {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.vision-map img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+}
+
+.vision-map figcaption {
+  color: var(--text-3);
+  font-size: 0.6875rem;
+  text-align: center;
+}
+
+.angle-swatch-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.angle-swatch {
+  height: 1.5rem;
+}
+
 .color-verdict {
   color: var(--text);
   font-size: 1rem;

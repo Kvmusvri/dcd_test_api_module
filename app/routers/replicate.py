@@ -1,11 +1,15 @@
+"""HTTP-слой Replicate: эндпоинты + оркестрация генерации (wrap/generate/retry).
+
+Транспорт (Files API, predictions) — `app.services.replicate_client`;
+работа с картинками (EXIF, размеры, кроп-под-клиента) — `app.services.imaging`.
+"""
+
 import asyncio
-import io
 import logging
 import time
 
 import httpx
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from PIL import Image, ImageOps
 
 from app.config import (
     MAX_FILE_SIZE,
@@ -15,19 +19,20 @@ from app.config import (
 )
 from app.db import get_conn, record_provider_request
 from app.prompts import get_flow_prompt
+from app.services import replicate_client as rc
+from app.services import imaging
 from app.storage import STORAGE_DIR, new_request_id, save_image
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-BASE_URL = "https://api.replicate.com/v1"
-PROVIDER = "replicate"
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 ALLOWED_ASPECTS = {"auto", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "16:9", "9:16", "21:9"}
 ALLOWED_RESOLUTIONS = {"", "1K", "2K", "4K"}
 POLL_INTERVAL_SEC = 2.0
 GENERATION_TIMEOUT_SEC = 300.0
+DOWNLOAD_TIMEOUT_SEC = 120.0
 
 # Модели, доступные в UI (у обеих одинаковая inputSchema: prompt, image_input,
 # aspect_ratio c match_input_image, resolution, output_format).
@@ -37,10 +42,6 @@ SUPPORTED_MODELS = [
     {"slug": "google/nano-banana-pro", "title": "Nano Banana Pro"},
 ]
 SUPPORTED_SLUGS = {m["slug"] for m in SUPPORTED_MODELS}
-
-
-def _auth_headers() -> dict:
-    return {"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
 
 
 def _get_token() -> str:
@@ -165,15 +166,15 @@ async def wrap(
         )
 
     # Порядок входов соответствует промпту: клиент, плёнка, референс(ы).
-    client_size = _image_size(contents[0][2])
+    client_size = imaging.image_size(contents[0][2])
     # Разрешение — ТОЛЬКО по клиентскому фото (руками не выбирается):
     # незачем генерить 4K для фото 1200px и бессмысленно просить 2K для 4K-фото.
-    wrap_resolution = _auto_resolution(client_size)
+    wrap_resolution = imaging.auto_resolution(client_size)
     # Пропорции задаём ЯВНО из клиентского фото: match_input_image при
     # мультивходе NB2 берёт пропорции непредсказуемо (2026-09-19: на 4:3
     # клиента вернулся портрет 1792x2400, кроп до клиентских пропорций срезал
     # бампер). Ближайший ratio из enum модели — детерминирован.
-    wrap_aspect = _closest_ratio(client_size) or "auto"
+    wrap_aspect = imaging.closest_ratio(client_size) or "auto"
     logger.info(
         "wrap: resolution=%s, aspect_ratio=%s (client photo %s)",
         wrap_resolution, wrap_aspect, client_size,
@@ -254,9 +255,9 @@ async def retry(request_id: str):
     is_wrap = bool(rows[0]["flow"])
     prompt = wrap_prompt if is_wrap else (stored_prompt or wrap_prompt)
 
-    target_size = _image_size(contents[0][1]) if is_wrap else None
-    retry_resolution = _auto_resolution(target_size) if is_wrap else ""
-    retry_aspect = (_closest_ratio(target_size) or "auto") if is_wrap else "auto"
+    target_size = imaging.image_size(contents[0][1]) if is_wrap else None
+    retry_resolution = imaging.auto_resolution(target_size) if is_wrap else ""
+    retry_aspect = (imaging.closest_ratio(target_size) or "auto") if is_wrap else "auto"
 
     new_request_id_value = new_request_id()
     logger.info(
@@ -302,33 +303,6 @@ def requests_history(limit: int = 50):
     return [dict(r) for r in rows]
 
 
-async def _upload_input(content_type: str | None, data: bytes) -> str:
-    """Загрузка входной картинки через Files API Replicate, возвращает URL для input."""
-    data = _normalize_orientation(data)
-    normalized = "image/jpeg" if content_type == "image/jpg" else (content_type or "image/png")
-    filename = "input." + normalized.split("/")[1]
-
-    async with httpx.AsyncClient(timeout=120.0) as api:
-        resp = await api.post(
-            f"{BASE_URL}/files",
-            headers=_auth_headers(),
-            files={"content": (filename, data, normalized)},
-        )
-    if resp.status_code not in (200, 201):
-        detail = f"Replicate files {resp.status_code}: {_error_text(resp)}"
-        logger.error("input upload failed: %s", detail)
-        raise HTTPException(status_code=502, detail=detail)
-
-    file_url = (resp.json().get("urls") or {}).get("get")
-    if not file_url:
-        detail = "Replicate не вернул URL загруженного файла"
-        logger.error("input upload failed: %s", detail)
-        raise HTTPException(status_code=502, detail=detail)
-
-    logger.info("input uploaded: %s, %dKB", normalized, len(data) // 1024)
-    return file_url
-
-
 async def _run_job(
     request_id: str,
     prompt: str,
@@ -342,7 +316,7 @@ async def _run_job(
     """Загрузить входные, сабмитнуть модель, дождаться результата, сохранить."""
     reference_urls = []
     for mime, data in contents:
-        reference_urls.append(await _upload_input(mime, data))
+        reference_urls.append(await rc.upload_file(mime, imaging.normalize_orientation(data)))
 
     model_input: dict = {"prompt": prompt, "image_input": reference_urls}
     if resolution:
@@ -353,26 +327,24 @@ async def _run_job(
 
     started = time.monotonic()
     try:
-        controller = await _submit(model, model_input, request_id)
-    except HTTPException:
-        raise
+        controller = await rc.create_prediction(model, model_input)
+    except rc.ReplicateError as exc:
+        record_provider_request(request_id, rc.PROVIDER, None, "error", exc.detail)
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     provider_request_id = controller["id"]
     poll_url = controller["poll_url"]
     logger.info("submitted: request_id=%s provider_request_id=%s model=%s", request_id, provider_request_id, model)
-    record_provider_request(request_id, PROVIDER, provider_request_id, "submitted")
+    record_provider_request(request_id, rc.PROVIDER, provider_request_id, "submitted")
 
     state, payload = "starting", {}
     waited = 0.0
     while waited < GENERATION_TIMEOUT_SEC:
-        async with httpx.AsyncClient(timeout=60.0) as api:
-            resp = await api.get(poll_url, headers=_auth_headers())
-        if resp.status_code != 200:
-            detail = f"Replicate status {resp.status_code}: {_error_text(resp)}"
-            record_provider_request(request_id, PROVIDER, provider_request_id, "error", detail)
-            logger.error("poll failed: %s", detail)
-            raise HTTPException(status_code=502, detail=detail)
-        payload = resp.json()
+        try:
+            payload = await rc.fetch_prediction(poll_url)
+        except rc.ReplicateError as exc:
+            record_provider_request(request_id, rc.PROVIDER, provider_request_id, "error", exc.detail)
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
         state = payload.get("status")
         if state in ("succeeded", "failed", "canceled"):
             break
@@ -385,7 +357,7 @@ async def _run_job(
             f"Таймаут {GENERATION_TIMEOUT_SEC:.0f} с: генерация не завершилась. "
             f"provider_request_id={provider_request_id}, status_url={poll_url}"
         )
-        record_provider_request(request_id, PROVIDER, provider_request_id, "timeout", detail)
+        record_provider_request(request_id, rc.PROVIDER, provider_request_id, "timeout", detail)
         logger.error("timeout: %s", detail)
         raise HTTPException(status_code=504, detail=detail)
 
@@ -394,50 +366,19 @@ async def _run_job(
         logger.info(
             "provider completed in %.1fs (provider_request_id=%s)", elapsed, provider_request_id
         )
-        record_provider_request(request_id, PROVIDER, provider_request_id, "completed")
+        record_provider_request(request_id, rc.PROVIDER, provider_request_id, "completed")
     elif state == "failed":
         detail = f"Генерация Replicate упала: {payload.get('error') or 'без описания'}"
-        record_provider_request(request_id, PROVIDER, provider_request_id, "failed", detail)
+        record_provider_request(request_id, rc.PROVIDER, provider_request_id, "failed", detail)
         logger.warning("provider failed: %s", detail)
         raise HTTPException(status_code=502, detail=detail)
     else:
         detail = "Запрос Replicate был отменён"
-        record_provider_request(request_id, PROVIDER, provider_request_id, "canceled", detail)
+        record_provider_request(request_id, rc.PROVIDER, provider_request_id, "canceled", detail)
         logger.warning("provider canceled: %s", detail)
         raise HTTPException(status_code=502, detail=detail)
 
     return await _save_outputs(payload, request_id, prompt, model, provider_request_id, target_size, flow)
-
-
-async def _submit(model: str, model_input: dict, request_id: str) -> dict:
-    """POST на официальную модель без версии; при отказе от aspect_ratio — повтор без него.
-
-    Возвращает {"id": ..., "poll_url": ...}.
-    """
-    url = f"{BASE_URL}/models/{model}/predictions"
-    async with httpx.AsyncClient(timeout=120.0) as api:
-        resp = await api.post(url, headers=_auth_headers(), json={"input": model_input})
-
-        if resp.status_code in (400, 422) and "aspect_ratio" in _error_text(resp).lower():
-            logger.warning("model %s rejected aspect_ratio (%s); retrying without it", model, _error_text(resp)[:200])
-            retried_input = {k: v for k, v in model_input.items() if k != "aspect_ratio"}
-            resp = await api.post(url, headers=_auth_headers(), json={"input": retried_input})
-
-    if resp.status_code not in (200, 201):
-        detail = f"Сабмит в Replicate не удался ({resp.status_code}): {_error_text(resp)}"
-        record_provider_request(request_id, PROVIDER, None, "error", detail)
-        logger.error("submit failed: %s", detail)
-        raise HTTPException(status_code=502, detail=detail)
-
-    payload = resp.json()
-    poll_url = (payload.get("urls") or {}).get("get") or f"{BASE_URL}/predictions/{payload.get('id')}"
-    if not payload.get("id"):
-        detail = "Replicate не вернул id предсказания"
-        record_provider_request(request_id, PROVIDER, None, "error", detail)
-        logger.error("submit failed: %s", detail)
-        raise HTTPException(status_code=502, detail=detail)
-
-    return {"id": payload["id"], "poll_url": poll_url}
 
 
 async def _save_outputs(
@@ -454,31 +395,31 @@ async def _save_outputs(
         outputs = [outputs]
 
     outgoing_ids: list[int] = []
-    async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as downloader:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT_SEC) as downloader:
         for url in outputs:
             if not isinstance(url, str) or not url:
                 continue
             if url.startswith("data:"):
-                content = _decode_data_uri(url)
+                content = imaging.decode_data_uri(url)
                 if content is None:
                     continue
             else:
                 file_resp = await downloader.get(url)
                 if file_resp.status_code != 200:
                     detail = f"Не удалось скачать результат генерации ({file_resp.status_code}): url={url}"
-                    record_provider_request(request_id, PROVIDER, provider_request_id, "error", detail)
+                    record_provider_request(request_id, rc.PROVIDER, provider_request_id, "error", detail)
                     logger.error("download failed: %s", detail)
                     raise HTTPException(status_code=502, detail=detail)
                 content = file_resp.content
 
-            data = _match_size(content, target_size)
+            data = imaging.match_size(content, target_size)
             row = save_image(
                 data,
                 "outgoing",
                 model=model,
                 prompt=prompt,
                 request_id=request_id,
-                mime="image/png",
+                mime=imaging.sniff_mime(data),
                 flow=flow,
             )
             logger.info(
@@ -487,128 +428,3 @@ async def _save_outputs(
             )
             outgoing_ids.append(row["id"])
     return outgoing_ids
-
-
-def _decode_data_uri(uri: str) -> bytes | None:
-    try:
-        import base64
-
-        header, _, encoded = uri.partition(",")
-        if "base64" not in header:
-            return None
-        return base64.b64decode(encoded)
-    except Exception:
-        return None
-
-
-def _closest_ratio(size: tuple[int, int] | None) -> str | None:
-    """Ближайший из форматов enum модели к пропорциям клиентского фото.
-
-    Основной путь wrap-флоу: явный ratio надёжнее match_input_image,
-    который при мультивходе берёт пропорции непредсказуемо.
-    """
-    if not size:
-        return None
-    width, height = size
-    ratio = width / height
-    options = ((1, 1), (3, 2), (2, 3), (4, 3), (3, 4), (4, 5), (5, 4), (9, 16), (16, 9), (21, 9))
-    best_w, best_h = min(options, key=lambda r: abs(r[0] / r[1] - ratio))
-    return f"{best_w}:{best_h}"
-
-
-def _image_size(data: bytes) -> tuple[int, int] | None:
-    try:
-        with Image.open(io.BytesIO(data)) as img:
-            return ImageOps.exif_transpose(img).size
-    except Exception:
-        return None
-
-
-def _match_size(data: bytes, target: tuple[int, int] | None) -> bytes:
-    # Требование флоу оклейки: выход обязан совпадать с размером клиентского фото.
-    # Пропорции не совпали — сначала центр-кроп до целевых (растяжение искажает
-    # геометрию авто), апскейл сильнее 2x бессмыслен — оставляем разрешение модели.
-    if target is None:
-        return data
-    try:
-        with Image.open(io.BytesIO(data)) as img:
-            if img.size == target:
-                return data
-            out_w, out_h = img.size
-            tgt_w, tgt_h = target
-            out_ratio, tgt_ratio = out_w / out_h, tgt_w / tgt_h
-            if abs(out_ratio - tgt_ratio) / tgt_ratio > 0.01:
-                if out_ratio > tgt_ratio:
-                    new_w = round(out_h * tgt_ratio)
-                    left = (out_w - new_w) // 2
-                    img = img.crop((left, 0, left + new_w, out_h))
-                else:
-                    new_h = round(out_w / tgt_ratio)
-                    top = (out_h - new_h) // 2
-                    img = img.crop((0, top, out_w, top + new_h))
-                logger.warning("output %dx%d cropped to client aspect %dx%d", out_w, out_h, img.size[0], img.size[1])
-            if tgt_w > img.size[0] * 2 or tgt_h > img.size[1] * 2:
-                logger.warning(
-                    "client photo %dx%d is >2x the model output %dx%d — keeping model resolution",
-                    tgt_w, tgt_h, *img.size,
-                )
-                img = img.copy()
-                buffer = io.BytesIO()
-                img.save(buffer, format="PNG")
-                return buffer.getvalue()
-            if img.size != target:
-                img = img.resize(target, Image.LANCZOS)
-            buffer = io.BytesIO()
-            img.save(buffer, format="PNG")
-            return buffer.getvalue()
-    except Exception:
-        return data
-
-
-def _normalize_orientation(data: bytes) -> bytes:
-    """Модель видит «сырые» пиксели без EXIF: фото с тегом Orientation приедет боком.
-
-    Пересобираем такие файлы до загрузки (ориентация применяется, EXIF
-    сбрасывается); файлы без поворота уходят байт-в-байт, без пережатия.
-    """
-    try:
-        with Image.open(io.BytesIO(data)) as img:
-            if (img.getexif().get(0x0112) or 1) == 1:
-                return data
-            fmt = img.format or "JPEG"
-            fixed = ImageOps.exif_transpose(img)
-        buffer = io.BytesIO()
-        save_kwargs = {"quality": 95} if fmt == "JPEG" else {}
-        fixed.save(buffer, format=fmt, **save_kwargs)
-        logger.info("input re-encoded: EXIF orientation applied, fmt=%s", fmt)
-        return buffer.getvalue()
-    except Exception:
-        return data
-
-
-def _auto_resolution(client_size: tuple[int, int] | None) -> str:
-    """Разрешение модели ТОЛЬКО по размеру клиентского фото (ручной выбор убран).
-
-    Длинная сторона > 2048 → 4K, > 1024 → 2K, иначе 1K: генерируем не крупнее
-    необходимого (меньше 2K всё равно растянется до клиента и потеряет резкость,
-    1K достаточен для мелких фото). Размер не читается — консервативный 2K.
-    """
-    if not client_size:
-        return "2K"
-    if max(client_size) > 2048:
-        return "4K"
-    if max(client_size) > 1024:
-        return "2K"
-    return "1K"
-
-
-def _error_text(resp: httpx.Response) -> str:
-    try:
-        payload = resp.json()
-    except Exception:
-        return resp.text[:500]
-    if isinstance(payload, dict):
-        for key in ("detail", "error", "message", "title"):
-            if payload.get(key):
-                return str(payload[key])[:500]
-    return resp.text[:500]

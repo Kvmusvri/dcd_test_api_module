@@ -8,3 +8,6 @@ __pycache__/
 
 # Runtime data (изображения + база метаданных)
 storage/
+
+# Нейро-веса ray-конвейера (скачиваются make models, в git не хранятся)
+app/vision/models/*.onnx

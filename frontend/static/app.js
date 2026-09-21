@@ -533,6 +533,48 @@ function colorCard(label, side) {
   crop.alt = "найденный кузов (ROI)";
   card.append(crop);
 
+  if (side.vision) {
+    const maps = document.createElement("div");
+    maps.className = "vision-maps";
+    const titles = { normals: "нормали", albedo: "цвет без света" };
+    Object.entries(titles).forEach(([key, title]) => {
+      const wrap = document.createElement("figure");
+      wrap.className = "vision-map";
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      const cap = document.createElement("figcaption");
+      if (key === "albedo" && side.albedo_preview) {
+        img.src = side.albedo_preview;
+        cap.textContent = "albedo (нейросеть)";
+      } else {
+        img.src = side.vision.maps[key];
+        const srcLabel = key === "normals" && side.vision.normals_src === "sfs" ? " (прибл.)" : "";
+        cap.textContent = title + srcLabel;
+      }
+      img.alt = cap.textContent;
+      wrap.append(img, cap);
+      maps.append(wrap);
+    });
+    card.append(maps);
+
+    const bins = side.vision.tone_bins || [];
+    if (bins.length >= 3) {
+      const toneWrap = document.createElement("div");
+      toneWrap.className = "angle-swatch-wrap";
+      const toneBar = document.createElement("div");
+      toneBar.className = "swatch-gradient angle-swatch";
+      const steps = bins
+        .map((b, i) => `rgb(${b.rgb.join(",")}) ${Math.round(((i + 0.5) / bins.length) * 100)}%`)
+        .join(", ");
+      toneBar.style.background = `linear-gradient(90deg, ${steps})`;
+      const toneCap = document.createElement("span");
+      toneCap.className = "color-scale";
+      toneCap.textContent = "цвет по полутонам: тень → свет";
+      toneWrap.append(toneBar, toneCap);
+      card.append(toneWrap);
+    }
+  }
+
   return card;
 }
 
@@ -549,6 +591,12 @@ function renderColorResult(data) {
 
   const verdict = document.createElement("p");
   verdict.className = "color-verdict";
+  if (data.delta_e.tone != null) {
+    verdict.append(
+      `ΔE по полутонам: ${data.delta_e.tone} — ${deltaVerdict(data.delta_e.tone)}`,
+      document.createElement("br")
+    );
+  }
   verdict.append(
     `ΔE свет: ${data.delta_e.lit} — ${deltaVerdict(data.delta_e.lit)}`,
     document.createElement("br"),
@@ -557,7 +605,7 @@ function renderColorResult(data) {
   );
   const scale = document.createElement("span");
   scale.className = "color-scale";
-  scale.textContent = "шкала: до 2 — совпадение · 2–5 — лёгкое расхождение · 5–10 — заметное · больше 10 — сильное";
+  scale.textContent = "шкала: до 2 — совпадение · 2–5 — лёгкое расхождение · 5–10 — заметное · больше 10 — сильное · сравнение по нейро-albedo (цвет краски без света)";
   verdict.append(scale);
   box.append(verdict);
 }

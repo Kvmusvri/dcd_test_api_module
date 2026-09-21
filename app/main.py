@@ -1,9 +1,10 @@
+import hashlib
 import logging
 import logging.handlers
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, PORT
@@ -45,6 +46,14 @@ setup_logging()
 async def lifespan(application: FastAPI):
     init_db()
     logger.info("startup: storage=%s, port=%s", BASE_DIR / "storage", PORT)
+    # Нейро-модели: качание/загрузка весов при СТАРТЕ контейнера (не на
+    # первом запросе). Ошибка не валит сервис — запрос вернёт 503 с текстом.
+    try:
+        from app.vision import albedo as v_albedo
+
+        v_albedo.warmup()
+    except Exception:
+        logger.exception("albedo warmup crashed at startup")
     yield
     logger.info("shutdown")
 
@@ -60,7 +69,21 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="stati
 
 @app.get("/")
 def index():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    # Версионирование ассетов по содержимому (?v=<hash>): браузер не имеет
+    # права держать app.js/style.css в кеше дольше, чем они меняются — иначе
+    # после rebuild страница ловит старый фронт против нового API
+    # (урок 2026-09-20: «Cannot read properties of undefined (reading 'cct_k')»).
+    html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    digest = hashlib.sha256()
+    for name in ("app.js", "style.css"):
+        try:
+            digest.update((FRONTEND_DIR / "static" / name).read_bytes())
+        except OSError:
+            pass
+    version = digest.hexdigest()[:10]
+    html = html.replace('"/static/app.js"', f'"/static/app.js?v={version}"')
+    html = html.replace('"/static/style.css"', f'"/static/style.css?v={version}"')
+    return HTMLResponse(html)
 
 
 @app.get("/favicon.ico")
