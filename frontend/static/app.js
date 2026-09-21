@@ -545,7 +545,7 @@ function colorCard(label, side) {
       const cap = document.createElement("figcaption");
       if (key === "albedo" && side.albedo_preview) {
         img.src = side.albedo_preview;
-        cap.textContent = "albedo (нейросеть)";
+        cap.textContent = "нейтральный рендер (нейро)";
       } else {
         img.src = side.vision.maps[key];
         const srcLabel = key === "normals" && side.vision.normals_src === "sfs" ? " (прибл.)" : "";

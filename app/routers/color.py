@@ -76,7 +76,7 @@ async def compare(
     for name, (_mime, data) in payload.items():
         # Единая ветка: albedo → маска → анализ. Ошибки — наружу, без fallback.
         try:
-            alb_arr = v_albedo.albedo_srgb(data)
+            alb_arr = v_albedo.neutral_render_srgb(data)
         except (VisionNotReady, VisionError) as exc:
             logger.error("albedo failed for %s: %s", name, exc)
             raise _vision_to_http(exc, name) from exc

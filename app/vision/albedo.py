@@ -86,12 +86,16 @@ def warmup() -> None:
         logger.error("albedo warmup failed (запрос повторит попытку): %s", exc)
 
 
-def albedo_srgb(data: bytes) -> np.ndarray:
-    """Фото (bytes) → albedo в sRGB uint8 того же размера.
+def neutral_render_srgb(data: bytes) -> np.ndarray:
+    """Фото → нейтрально перезалитый кадр (sRGB uint8 того же размера).
 
-    Вход пайплайна — sRGB [0..1]; выход hr_alb — линейный albedo, возвращаем
-    обратно в sRGB (гамма 2.2 — та же, что использовала сеть на входе).
-    Ошибки инференса не глотаются — VisionError наверх.
+    Intrinsic возвращает albedo (hr_alb) и цветной диффузный шейдинг
+    (dif_shd), причём image ≈ albedo × shading. Прямой albedo для
+    хамелеонов теряет сигнатуру: сеть вычитает розовую подсветку углов
+    как «свет». Поэтому собираем кадр ОБРАТНО — albedo × шейдинг, где
+    шейдинг поканально нормирован к нейтральной медиане: цветовая
+    температура света сцены уходит, угловая структура и цвет плёнки
+    (включая хамелеонные зоны) остаются. Ошибки — VisionError наверх.
     """
     models = _get_models()
     device = models.get("__device__", "cpu")
@@ -108,14 +112,22 @@ def albedo_srgb(data: bytes) -> np.ndarray:
 
         results = run_pipeline(models, arr, device=device)
         hr_alb = results.get("hr_alb")
-        if hr_alb is None:
-            raise VisionError("run_pipeline не вернул hr_alb")
+        dif_shd = results.get("dif_shd")
+        if hr_alb is None or dif_shd is None:
+            raise VisionError("run_pipeline не вернул hr_alb/dif_shd")
     except VisionError:
         raise
     except Exception as exc:
         raise VisionError(f"инференс intrinsic упал: {exc}") from exc
 
-    srgb = np.clip(np.power(np.asarray(hr_alb, dtype=np.float64), 1.0 / 2.2), 0.0, 1.0)
+    alb = np.asarray(hr_alb, dtype=np.float64)
+    shd = np.asarray(dif_shd, dtype=np.float64)
+    # Цвет источника = медиана шейдинга по кадру, поканально → нейтраль.
+    med = np.median(shd.reshape(-1, shd.shape[-1]), axis=0)
+    shd_norm = shd / np.maximum(med, 1e-6)
+    relit = np.clip(alb * shd_norm, 0.0, 1.0)
+
+    srgb = np.clip(np.power(relit, 1.0 / 2.2), 0.0, 1.0)
     out = Image.fromarray((srgb * 255).astype(np.uint8))
     if out.size != img.size:
         out = out.resize(img.size, Image.LANCZOS)
