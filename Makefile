@@ -101,17 +101,26 @@ dedup: setup
 
 report:
 	@echo ""
-	@echo ">> Waiting for health check..."
+	@echo ">> Waiting for application startup (watching container logs)..."
 	@ok=""; \
-	for i in $$(seq 1 30); do \
-		if command -v curl >/dev/null 2>&1; then \
-			curl -sf http://localhost:8100/api/health >/dev/null 2>&1 && ok=1 && break; \
-		else \
-			python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8100/api/health', timeout=2)" 2>/dev/null && ok=1 && break; \
+	while [ "$$ok" != "1" ]; do \
+		if docker logs dcd_test 2>&1 | grep -q "Application startup complete"; then ok=1; break; fi; \
+		if [ "$$(docker inspect -f '{{.State.Running}}' dcd_test 2>/dev/null)" != "true" ]; then \
+			echo "[ERROR] Container dcd_test stopped during startup. Check: make logs"; exit 1; \
 		fi; \
-		sleep 1; \
+		sleep 2; \
 	done; \
 	if [ "$$ok" = "1" ]; then \
+		echo ">> Startup complete - verifying health endpoint..."; \
+		for i in $$(seq 1 10); do \
+			if command -v curl >/dev/null 2>&1; then \
+				curl -sf http://localhost:8100/api/health >/dev/null 2>&1 && break; \
+			else \
+				python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8100/api/health', timeout=2)" 2>/dev/null && break; \
+			fi; \
+			sleep 1; \
+		done; \
+		health=$$(docker inspect --format '{{.State.Health.Status}}' dcd_test 2>/dev/null); \
 		health=$$(docker inspect --format '{{.State.Health.Status}}' dcd_test 2>/dev/null); \
 		ports=$$(docker port dcd_test 2>/dev/null | tr '\n' ' '); \
 		echo ""; \

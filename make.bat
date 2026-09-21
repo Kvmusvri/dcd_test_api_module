@@ -125,15 +125,24 @@ goto :eof
 
 :report
 echo.
-echo ^>^> Waiting for health check...
-set TRIES=0
+echo ^>^> Waiting for application startup (watching container logs)...
 :wait_loop
+docker logs dcd_test 2>&1 | findstr /C:"Application startup complete" >nul
+if not errorlevel 1 goto logs_ok
+docker inspect -f "{{.State.Running}}" dcd_test 2>nul | findstr "true" >nul
+if errorlevel 1 goto not_healthy
+timeout /t 2 /nobreak >nul
+goto wait_loop
+:logs_ok
+echo ^>^> Startup complete - verifying health endpoint...
+set HTRIES=0
+:health_loop
 curl -sf -o nul http://localhost:8100/api/health
 if not errorlevel 1 goto healthy
-set /a TRIES+=1
-if %TRIES% geq 30 goto not_healthy
-timeout /t 1 /nobreak >nul
-goto wait_loop
+set /a HTRIES+=1
+if %HTRIES% geq 10 goto not_healthy
+timeout /t 2 /nobreak >nul
+goto health_loop
 :healthy
 set HEALTH=
 for /f %%H in ('docker inspect --format "{{.State.Health.Status}}" dcd_test 2^>nul') do set HEALTH=%%H
