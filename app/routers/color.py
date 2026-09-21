@@ -122,23 +122,23 @@ async def compare(
     # только по пересечению непустых корзин; ≥3 общих, иначе профиль не выдаётся.
     tone_bins = []
     tone_de = None
-    left_map = {b["l"]: b for b in result["left"]["vision"]["tone_bins"]}
-    right_map = {b["l"]: b for b in result["right"]["vision"]["tone_bins"]}
+    left_map = {b["pos"]: b for b in result["left"]["vision"]["tone_bins"]}
+    right_map = {b["pos"]: b for b in result["right"]["vision"]["tone_bins"]}
     common = sorted(set(left_map) & set(right_map))
     if len(common) >= 3:
-        for l_center in common:
+        for pos in common:
             de = round(
                 delta_e_2000(
-                    np.array(left_map[l_center]["lab"]),
-                    np.array(right_map[l_center]["lab"]),
+                    np.array(left_map[pos]["lab"]),
+                    np.array(right_map[pos]["lab"]),
                 ),
                 1,
             )
             tone_bins.append(
                 {
-                    "l": l_center,
-                    "rgb_left": left_map[l_center]["rgb"],
-                    "rgb_right": right_map[l_center]["rgb"],
+                    "pos": pos,
+                    "rgb_left": left_map[pos]["rgb"],
+                    "rgb_right": right_map[pos]["rgb"],
                     "de": de,
                 }
             )

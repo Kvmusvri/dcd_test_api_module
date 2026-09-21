@@ -37,13 +37,17 @@ CHROMA_SATURATED = 8.0
 # сверху и без тёмного не-окрашенного хвоста снизу — их режут границы).
 SHADOW_BAND = (0.08, 0.38)
 LIT_BAND = (0.60, 0.95)
-# Полутоновой профиль по АБСОЛЮТНОЙ светлоте (не по рангу внутри кадра):
-# у хамелеона тон ≈ угол (тёмный край сворла и тень машины — скользящий
-# угол), поэтому сравнивать кривые можно только в общих L-корзинах —
-# иначе у кадров с разной долей света ранги несопоставимы.
-L_BIN_CENTERS = (20, 32, 44, 56, 68, 80)
-L_BIN_HALF = 6.0
+# Полутоновой профиль: контраст освещения каждого кадра нормируется
+# (p3–p97 светлоты кузова → 0–100), бины фиксированные. Солнечный кадр
+# с выжженным бликом сжимается к пасмурному — кривые «цвет(тон)» становятся
+# сравнимыми между любыми кадрами. Выжженный пересвет (белый без хромы)
+# исключается: в клипнутых пикселях цвета физически нет.
+CONTRAST_LO, CONTRAST_HI = 3.0, 97.0
+TONE_BIN_COUNT = 5
 TONE_BIN_MIN_PIX = 30
+# Пересвет: светлота ≥ 92 при хроме < 10 — «белое пятно», цвета в нём нет.
+BLOWN_L = 92.0
+BLOWN_CHROMA = 10.0
 # Порог фильтра не-окрашенного тёмного подмеса (колёса/стёкла в маске
 # U2-Net): L < половины медианы верхней половины маски — не краска.
 PAINT_DARK_RATIO = 0.5
@@ -140,14 +144,29 @@ def _vision_maps(
 
     tone_bins: list[dict] = []
     lightness = corrected[:, 0]
-    for center in L_BIN_CENTERS:
-        sel = np.abs(lightness - center) <= L_BIN_HALF
+    chroma_all = np.hypot(corrected[:, 1], corrected[:, 2])
+    # Выжженный пересвет: белый без хромы — цвета в нём нет.
+    paint_mask = ~((lightness >= BLOWN_L) & (chroma_all < BLOWN_CHROMA))
+    if int(paint_mask.sum()) >= 100:
+        lightness, chroma_all = lightness[paint_mask], chroma_all[paint_mask]
+        paint_pixels = corrected[paint_mask]
+    else:
+        paint_pixels = corrected
+
+    # Нормировка контраста освещения: p3–p97 светлоты кузова → 0–100.
+    lo, hi = np.percentile(lightness, [CONTRAST_LO, CONTRAST_HI])
+    span = max(hi - lo, 1e-6)
+    l_norm = np.clip((lightness - lo) / span * 100.0, 0.0, 100.0)
+
+    bin_w = 100.0 / TONE_BIN_COUNT
+    for b in range(TONE_BIN_COUNT):
+        sel = (l_norm >= b * bin_w) & (l_norm < (b + 1) * bin_w)
         if int(sel.sum()) < TONE_BIN_MIN_PIX:
             continue
-        lab_bin = _paint_median(corrected[sel])
+        lab_bin = _paint_median(paint_pixels[sel])
         tone_bins.append(
             {
-                "l": center,
+                "pos": round((b + 0.5) * bin_w / 100.0, 3),
                 "lab": [round(float(v), 1) for v in lab_bin],
                 "rgb": lab_to_srgb_scalar(lab_bin),
             }
