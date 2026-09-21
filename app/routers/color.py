@@ -116,33 +116,41 @@ async def compare(
     def lab_of(side: dict, key: str) -> np.ndarray:
         return np.array(side[key]["lab"])
 
-    # Полутоновой профиль по АБСОЛЮТНОЙ светлоте: у хамелеона тон ≈ угол,
-    # поэтому кривые «цвет(тон)» сопоставляются в ОБЩИХ L-корзинах (одинаковый
-    # тон ≈ одинаковый угол при любом кадре — сворл, тень, солнце). Сравнение —
-    # только по пересечению непустых корзин; ≥3 общих, иначе профиль не выдаётся.
+    # Полутоновой профиль: сравнение ФОРМЫ кривой «цвет(относительный тон)».
+    # Хамелеон в пасмур реально почти серый — абсолютное сравнение гнало бы
+    # «солнце vs пасмур» в вечный промах. Разделяем: ФОРМА (оттенок и
+    # относительная насыщенность по тонам — свойство ПЛЁНКИ) и амплитуда
+    # (насколько насыщенно плёнка проявилась в кадре — свойство СЪЁМКИ).
+    # Форма: (a,b) каждого бина нормируются на максимальную хрому кривой
+    # стороны, ΔE2000 при L=50 — короткие серые вектора автоматически дают
+    # малый вклад. Отдельно — амплитудное отношение насыщенности.
     tone_bins = []
     tone_de = None
-    left_map = {b["pos"]: b for b in result["left"]["vision"]["tone_bins"]}
-    right_map = {b["pos"]: b for b in result["right"]["vision"]["tone_bins"]}
-    common = sorted(set(left_map) & set(right_map))
-    if len(common) >= 3:
-        for pos in common:
-            de = round(
-                delta_e_2000(
-                    np.array(left_map[pos]["lab"]),
-                    np.array(right_map[pos]["lab"]),
-                ),
-                1,
-            )
-            tone_bins.append(
-                {
-                    "pos": pos,
-                    "rgb_left": left_map[pos]["rgb"],
-                    "rgb_right": right_map[pos]["rgb"],
-                    "de": de,
-                }
-            )
-        tone_de = round(float(np.median([b["de"] for b in tone_bins])), 1)
+    tone_amp = None
+    left_bins = result["left"]["vision"]["tone_bins"]
+    right_bins = result["right"]["vision"]["tone_bins"]
+    if left_bins and right_bins:
+        left_map = {b["pos"]: b for b in left_bins}
+        right_map = {b["pos"]: b for b in right_bins}
+        common = sorted(set(left_map) & set(right_map))
+        c_max_l = max((b["chroma"] for b in left_bins), default=0.0)
+        c_max_r = max((b["chroma"] for b in right_bins), default=0.0)
+        if len(common) >= 3 and c_max_l > 1 and c_max_r > 1:
+            for pos in common:
+                lb, rb = np.array(left_map[pos]["lab"]), np.array(right_map[pos]["lab"])
+                a1, b1 = lb[1] / c_max_l * 50.0, lb[2] / c_max_l * 50.0
+                a2, b2 = rb[1] / c_max_r * 50.0, rb[2] / c_max_r * 50.0
+                de = round(delta_e_2000(np.array([50.0, a1, b1]), np.array([50.0, a2, b2])), 1)
+                tone_bins.append(
+                    {
+                        "pos": pos,
+                        "rgb_left": left_map[pos]["rgb"],
+                        "rgb_right": right_map[pos]["rgb"],
+                        "de": de,
+                    }
+                )
+            tone_de = round(float(np.median([b["de"] for b in tone_bins])), 1)
+            tone_amp = round(min(c_max_l, c_max_r) / max(c_max_l, c_max_r), 2)
 
     return {
         "request_id": request_id,
@@ -153,8 +161,11 @@ async def compare(
             # основной ΔE — по нейросетевому albedo (цвет краски без света).
             "lit": round(delta_e_2000(lab_of(result["left"], "lit"), lab_of(result["right"], "lit")), 1),
             "shadow": round(delta_e_2000(lab_of(result["left"], "shadow"), lab_of(result["right"], "shadow")), 1),
-            # по полутонам — профиль «путешествия цвета» плёнки.
+            # по полутонам — ФОРМА кривой цвета (оттенок + относительная
+            # насыщенность): свойство плёнки. tone_amp — отношение
+            # насыщенности проявления (свойство съёмки: солнце/пасмур).
             "tone": tone_de,
+            "tone_amp": tone_amp,
             "tone_bins": tone_bins,
         },
     }

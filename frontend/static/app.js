@@ -593,9 +593,16 @@ function renderColorResult(data) {
   verdict.className = "color-verdict";
   if (data.delta_e.tone != null) {
     verdict.append(
-      `ΔE по полутонам: ${data.delta_e.tone} — ${deltaVerdict(data.delta_e.tone)}`,
+      `ΔE формы цвета: ${data.delta_e.tone} — ${deltaVerdict(data.delta_e.tone)}`,
       document.createElement("br")
     );
+    if (data.delta_e.tone_amp != null) {
+      const pct = Math.round(data.delta_e.tone_amp * 100);
+      verdict.append(
+        `насыщенность проявления: ${pct}% от более яркого кадра`,
+        document.createElement("br")
+      );
+    }
   }
   verdict.append(
     `ΔE свет: ${data.delta_e.lit} — ${deltaVerdict(data.delta_e.lit)}`,

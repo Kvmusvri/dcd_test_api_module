@@ -168,6 +168,7 @@ def _vision_maps(
             {
                 "pos": round((b + 0.5) * bin_w / 100.0, 3),
                 "lab": [round(float(v), 1) for v in lab_bin],
+                "chroma": round(float(np.hypot(lab_bin[1], lab_bin[2])), 2),
                 "rgb": lab_to_srgb_scalar(lab_bin),
             }
         )
