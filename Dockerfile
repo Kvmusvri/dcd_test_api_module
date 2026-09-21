@@ -19,7 +19,8 @@ RUN apt-get update \
  && pip install --no-cache-dir https://github.com/compphoto/Intrinsic/archive/main.zip
 
 # opencv 5.x (тянет chrislib) не упаковывает модуль cv2 → откат на 4.10 headless.
-RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.10.0.84
+RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.10.0.84 \
+ && pip install --no-cache-dir ultralytics
 
 COPY app ./app
 COPY frontend ./frontend

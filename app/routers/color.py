@@ -17,7 +17,7 @@ import logging
 
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.config import MAX_FILE_SIZE
 from app.services import car_roi
@@ -25,6 +25,7 @@ from app.services.colorimetry import delta_e_2000
 from app.storage import new_request_id, save_image
 from app.vision import VisionError, VisionNotReady
 from app.vision import albedo as v_albedo
+from app.vision import detect as v_detect
 from app.vision import segmentation
 
 logger = logging.getLogger(__name__)
@@ -74,9 +75,21 @@ async def compare(
 
     result = {}
     for name, (_mime, data) in payload.items():
-        # Единая ветка: albedo → маска → анализ. Ошибки — наружу, без fallback.
+        # Стадия 0: YOLO-детект → кроп автомобиля (небо/стены/дорога
+        # физически не попадают в анализ).
         try:
-            alb_arr = v_albedo.neutral_render_srgb(data)
+            img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+            crop_img = v_detect.car_crop(img)
+        except (VisionNotReady, VisionError) as exc:
+            logger.error("detect failed for %s: %s", name, exc)
+            raise _vision_to_http(exc, name) from exc
+        crop_buf = io.BytesIO()
+        crop_img.save(crop_buf, format="JPEG", quality=92)
+        crop_bytes = crop_buf.getvalue()
+
+        # Стадия 4: нейросетевой рендер при нейтральном свете на кропе.
+        try:
+            alb_arr = v_albedo.neutral_render_srgb(crop_bytes)
         except (VisionNotReady, VisionError) as exc:
             logger.error("albedo failed for %s: %s", name, exc)
             raise _vision_to_http(exc, name) from exc
@@ -92,7 +105,7 @@ async def compare(
 
         try:
             side = car_roi.analyze(
-                data, buf_full.getvalue(), segment=segmentation.body_mask
+                crop_bytes, buf_full.getvalue(), segment=segmentation.body_mask
             )
         except (VisionNotReady, VisionError) as exc:
             logger.error("analyze failed for %s: %s", name, exc)

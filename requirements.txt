@@ -9,3 +9,5 @@ numpy>=1.26
 onnxruntime>=1.18
 scikit-image>=0.24
 opencv-python-headless>=4.10,<5
+ultralytics>=8.3
+
