@@ -103,30 +103,33 @@ async def compare(
     def lab_of(side: dict, key: str) -> np.ndarray:
         return np.array(side[key]["lab"])
 
-    # Полутоновой профиль (путешествие цвета плёнки от тени к свету):
-    # бины светлоты сопоставляются по рангу, ΔE в каждом бине, сводная — медиана.
+    # Полутоновой профиль по АБСОЛЮТНОЙ светлоте: у хамелеона тон ≈ угол,
+    # поэтому кривые «цвет(тон)» сопоставляются в ОБЩИХ L-корзинах (одинаковый
+    # тон ≈ одинаковый угол при любом кадре — сворл, тень, солнце). Сравнение —
+    # только по пересечению непустых корзин; ≥3 общих, иначе профиль не выдаётся.
     tone_bins = []
     tone_de = None
-    left_bins = result["left"]["vision"]["tone_bins"]
-    right_bins = result["right"]["vision"]["tone_bins"]
-    if left_bins and right_bins:
-        for i in range(min(len(left_bins), len(right_bins))):
+    left_map = {b["l"]: b for b in result["left"]["vision"]["tone_bins"]}
+    right_map = {b["l"]: b for b in result["right"]["vision"]["tone_bins"]}
+    common = sorted(set(left_map) & set(right_map))
+    if len(common) >= 3:
+        for l_center in common:
             de = round(
                 delta_e_2000(
-                    np.array(left_bins[i]["lab"]), np.array(right_bins[i]["lab"])
+                    np.array(left_map[l_center]["lab"]),
+                    np.array(right_map[l_center]["lab"]),
                 ),
                 1,
             )
             tone_bins.append(
                 {
-                    "bin": i + 1,
-                    "rgb_left": left_bins[i]["rgb"],
-                    "rgb_right": right_bins[i]["rgb"],
+                    "l": l_center,
+                    "rgb_left": left_map[l_center]["rgb"],
+                    "rgb_right": right_map[l_center]["rgb"],
                     "de": de,
                 }
             )
-        if tone_bins:
-            tone_de = round(float(np.median([b["de"] for b in tone_bins])), 1)
+        tone_de = round(float(np.median([b["de"] for b in tone_bins])), 1)
 
     return {
         "request_id": request_id,

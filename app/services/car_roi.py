@@ -37,10 +37,13 @@ CHROMA_SATURATED = 8.0
 # сверху и без тёмного не-окрашенного хвоста снизу — их режут границы).
 SHADOW_BAND = (0.08, 0.38)
 LIT_BAND = (0.60, 0.95)
-# Полутоновой профиль: 6 ранговых бинов светлоты (после albedo) —
-# «путешествие цвета» плёнки от тени к свету.
-TONE_BIN_COUNT = 6
-TONE_BIN_MIN_PIX = 40
+# Полутоновой профиль по АБСОЛЮТНОЙ светлоте (не по рангу внутри кадра):
+# у хамелеона тон ≈ угол (тёмный край сворла и тень машины — скользящий
+# угол), поэтому сравнивать кривые можно только в общих L-корзинах —
+# иначе у кадров с разной долей света ранги несопоставимы.
+L_BIN_CENTERS = (20, 32, 44, 56, 68, 80)
+L_BIN_HALF = 6.0
+TONE_BIN_MIN_PIX = 30
 # Порог фильтра не-окрашенного тёмного подмеса (колёса/стёкла в маске
 # U2-Net): L < половины медианы верхней половины маски — не краска.
 PAINT_DARK_RATIO = 0.5
@@ -136,16 +139,15 @@ def _vision_maps(
         albedo_vis = albedo
 
     tone_bins: list[dict] = []
-    edges = np.quantile(corrected[:, 0], np.linspace(0, 1, TONE_BIN_COUNT + 1)[1:-1])
-    bin_idx = np.digitize(corrected[:, 0], edges)
-    for b in range(TONE_BIN_COUNT):
-        sel = bin_idx == b
+    lightness = corrected[:, 0]
+    for center in L_BIN_CENTERS:
+        sel = np.abs(lightness - center) <= L_BIN_HALF
         if int(sel.sum()) < TONE_BIN_MIN_PIX:
             continue
         lab_bin = _paint_median(corrected[sel])
         tone_bins.append(
             {
-                "pos": round((b + 0.5) / TONE_BIN_COUNT, 3),
+                "l": center,
                 "lab": [round(float(v), 1) for v in lab_bin],
                 "rgb": lab_to_srgb_scalar(lab_bin),
             }
