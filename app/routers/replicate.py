@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 
@@ -12,15 +13,22 @@ import httpx
 from fastapi import APIRouter, Form, HTTPException, UploadFile
 
 from app.config import (
+    COMFY_TIMEOUT,
+    COMFY_URL,
+    COMFY_WORKFLOW,
     MAX_FILE_SIZE,
     MAX_UPLOAD_FILES,
     REPLICATE_API_TOKEN,
     REPLICATE_MODEL,
+    WRAP_BEST_OF,
 )
 from app.db import get_conn, record_provider_request
 from app.prompts import get_flow_prompt
+from app.services import comfy_client as comfy
 from app.services import replicate_client as rc
 from app.services import imaging
+from app.services import paint_profile
+from app.services import settings as app_settings
 from app.storage import STORAGE_DIR, new_request_id, save_image
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,8 @@ SUPPORTED_MODELS = [
     {"slug": "google/nano-banana-pro", "title": "Nano Banana Pro"},
 ]
 SUPPORTED_SLUGS = {m["slug"] for m in SUPPORTED_MODELS}
+# Локальная модель (провайдер comfy) — фиксируется workflow'ом.
+COMFY_MODEL = "qwen-image-edit-2511"
 
 
 def _get_token() -> str:
@@ -53,6 +63,89 @@ def _get_token() -> str:
     return REPLICATE_API_TOKEN
 
 
+async def _run_comfy_job(
+    request_id: str,
+    contents: list[tuple[str | None, bytes]],
+    prompt: str,
+    model: str,
+    target_size: tuple[int, int] | None,
+    flow: str,
+    grade_refs: list[bytes] | None,
+) -> tuple[list[int], None]:
+    """Локальная генерация через ComfyUI (Qwen-Image-Edit-2511, 20 шагов
+    cfg 2.5): клиент + плёнка (2 LoadImage — потолок ноды Qwen), выход —
+    пиксели → общий хвост (match_size → сохранение).
+
+    Best-of-N (WRAP_BEST_OF, дефолт 3): генерируется N кадров с разными
+    сидами, каждый замеряется нейро-конвейером против консенсуса
+    референсов (paint_profile.color_score — только метрика, без правки
+    пикселей), наружу уходит БЛИЖАЙШИЙ к плёнке нетронутый кадр. Референсы
+    при этом не «миксуются» моделью — они только выбирают лучший бросок.
+    Если замер недоступен — уходит первый кадр."""
+    if not COMFY_WORKFLOW.exists():
+        raise HTTPException(status_code=503, detail=f"ComfyUI-workflow не найден: {COMFY_WORKFLOW}")
+    # contents приходят в двух форматах: wrap = (role, mime, data),
+    # retry = (mime, data) — данные всегда последний элемент.
+    images = [c[-1] for c in contents[:2]]
+    logger.info("comfy job: request_id=%s, images=%d, url=%s", request_id, len(images), COMFY_URL)
+
+    ref_analysis = None
+    if flow == "wrap" and grade_refs and WRAP_BEST_OF > 1:
+        try:
+            ref_analysis = await asyncio.to_thread(paint_profile.analyze_references, grade_refs)
+        except Exception as exc:  # noqa: BLE001 — генерация важнее замера
+            logger.warning("comfy: замер референсов упал, best-of-N выключен: %s", exc)
+            ref_analysis = None
+
+    content: bytes | None = None
+    best_score: float | None = None
+    for attempt in range(1, WRAP_BEST_OF + 1):
+        started = time.monotonic()
+        workflow = json.loads(COMFY_WORKFLOW.read_text(encoding="utf-8"))
+        try:
+            async with httpx.AsyncClient(timeout=COMFY_TIMEOUT) as client:
+                candidate = await comfy.run_workflow(
+                    client,
+                    COMFY_URL,
+                    workflow,
+                    images,
+                    COMFY_TIMEOUT,
+                    prefix=f"dcd_{request_id[:8]}_a{attempt}",
+                )
+        except comfy.ComfyError as exc:
+            record_provider_request(request_id, "comfy", None, "error", str(exc))
+            logger.error("comfy failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"ComfyUI: {exc}") from exc
+        if content is None:
+            content = candidate  # первый кадр — страховка, если замер недоступен
+        score: float | None = None
+        if ref_analysis is not None and ref_analysis.get("anchors") is not None:
+            score = await asyncio.to_thread(paint_profile.color_score, candidate, ref_analysis)
+        if score is None:
+            logger.info(
+                "comfy: attempt %d/%d in %.1fs — кадр не измерен, вне выбора",
+                attempt, WRAP_BEST_OF, time.monotonic() - started,
+            )
+            continue
+        logger.info(
+            "comfy: attempt %d/%d in %.1fs — color_score %.1f ΔE",
+            attempt, WRAP_BEST_OF, time.monotonic() - started, score,
+        )
+        if best_score is None or score < best_score:
+            best_score = score
+            content = candidate
+
+    logger.info(
+        "comfy: best-of-%d выбран кадр с ΔE %.1f (refs %s)",
+        WRAP_BEST_OF,
+        best_score if best_score is not None else -1.0,
+        f"{ref_analysis['used']}/{ref_analysis['total']}" if ref_analysis else "не измерены",
+    )
+
+    row_id = _finalize_output(content, request_id, prompt, model, target_size, flow)
+    return [row_id], None
+
+
 @router.get("/replicate/status")
 def status():
     return {"key_configured": bool(REPLICATE_API_TOKEN)}
@@ -61,6 +154,39 @@ def status():
 @router.get("/replicate/models")
 def models_list():
     return {"models": SUPPORTED_MODELS, "default": REPLICATE_MODEL}
+
+
+def _comfy_alive() -> bool:
+    """Явная проверка живости ComfyUI (вызывается по запросу из UI, не фоном)."""
+    try:
+        resp = httpx.get(f"{COMFY_URL}/system_stats", timeout=2.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+@router.get("/replicate/provider")
+def get_provider():
+    """Текущий провайдер генерации + живость ComfyUI (для вкладки «Провайдер»)."""
+    return {
+        "provider": app_settings.get_wrap_provider(),
+        "comfy_url": COMFY_URL,
+        "comfy_alive": _comfy_alive(),
+    }
+
+
+@router.post("/replicate/provider")
+async def set_provider(provider: str = Form(...)):
+    """Явно переключить провайдер генерации (replicate | comfy).
+
+    Сохраняется в storage/settings.json — переживает перезапуск контейнера.
+    Применяется к следующей генерации сразу, без restart."""
+    try:
+        saved = app_settings.set_wrap_provider(provider.strip().lower())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("provider switched via UI: %s", saved)
+    return {"provider": saved, "comfy_alive": _comfy_alive()}
 
 
 @router.post("/replicate/generate")
@@ -104,7 +230,9 @@ async def generate(
     for mime, data in contents:
         save_image(data, "incoming", model=effective_model, prompt=prompt, request_id=request_id, mime=mime)
 
-    outgoing_ids = await _run_job(request_id, prompt, aspect_ratio, contents, model=effective_model, resolution=resolution)
+    outgoing_ids, _grade = await _run_job(
+        request_id, prompt, aspect_ratio, contents, model=effective_model, resolution=resolution
+    )
 
     return {
         "request_id": request_id,
@@ -128,7 +256,17 @@ async def wrap(
     отдаётся в размере клиентского фото.
     """
     _get_token()
-    if model and model not in SUPPORTED_SLUGS:
+    # Валидация модели зависит от провайдера: comfy принимает только
+    # локальную модель, replicate — только nano-banana slugs.
+    provider = app_settings.get_wrap_provider()
+    if provider == "comfy":
+        if model and model != COMFY_MODEL:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Для провайдера comfy модель должна быть {COMFY_MODEL}",
+            )
+        model = COMFY_MODEL
+    elif model and model not in SUPPORTED_SLUGS:
         raise HTTPException(status_code=400, detail=f"Модель {model} не поддерживается")
     effective_model = model or REPLICATE_MODEL
     wrap_prompt = get_flow_prompt("wrap")
@@ -180,7 +318,25 @@ async def wrap(
         wrap_resolution, wrap_aspect, client_size,
     )
 
-    outgoing_ids = await _run_job(
+    # Референсы нужны comfy best-of-N (консенсус — судья выбора лучшего
+    # кадра); в генерацию они не уходят.
+    grade_refs = [data for role, _mime, data in contents if role == "reference"]
+
+    # Провайдер — явный выбор на вкладке «Провайдер» (хранимый в
+    # storage/settings.json, дефолт из .env).
+    if provider == "comfy":
+        outgoing_ids, grade = await _run_comfy_job(
+            request_id, contents, wrap_prompt, effective_model, client_size, "wrap", grade_refs
+        )
+        return {
+            "request_id": request_id,
+            "outgoing_ids": outgoing_ids,
+            "model": effective_model,
+            "provider": "comfy",
+            "grade": grade,
+        }
+
+    outgoing_ids, grade = await _run_job(
         request_id,
         wrap_prompt,
         wrap_aspect,
@@ -195,20 +351,23 @@ async def wrap(
         "request_id": request_id,
         "outgoing_ids": outgoing_ids,
         "model": effective_model,
+        "grade": grade,
     }
 
 
 @router.get("/replicate/last")
 def last():
-    """request_id последней попытки, у которой есть входные фото (для кнопки «Повторить»).
+    """request_id последней ГЕНЕРАЦИИ с входными фото (для кнопки «Повторить»).
 
-    Попытки-повторы сами не создают входных строк, поэтому ищем последнюю
-    попытку с загруженными фото — от неё и повторяем.
-    """
+    Сравнения вкладки «Колористика» (flow='color') попытками генерации не
+    являются: повтор по ним запускал оклейку с мусорными входами, а на
+    comfy падал с 500 (урок 2026-09-25). Wrap-попытки = flow='wrap',
+    свободные = NULL/пусто (старые строки до миграции)."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT request_id FROM images "
             "WHERE request_id IS NOT NULL AND direction = 'incoming' "
+            "AND (flow IS NULL OR flow != 'color') "
             "GROUP BY request_id ORDER BY MAX(id) DESC LIMIT 1"
         ).fetchone()
     return {"request_id": row["request_id"] if row else None}
@@ -243,17 +402,22 @@ async def retry(request_id: str):
         contents.append((row["mime"], path.read_bytes()))
 
     # Wrap-попытка определяется флагом flow из БД (старые строки до колонки
-    # размечены миграцией по префиксу промпта). Промпт для wrap — ВСЕГДА
-    # текущий из wrap.yaml: «Повторить» в продукте означает «те же фото с
-    # актуальными настройками»; повтор со старым промптом обесценивал бы
-    # кнопку после каждой правки промпта. Разрешение и пропорции — тем же
-    # авто-правилом, что и в wrap: только по клиентскому фото. Модель —
-    # как в исходной попытке (осознанный выбор той генерации).
+    # размечены миграцией по префиксу промпта). Точное сравнение: ЛЮБАЯ
+    # другая flow ('color' и пр.) — не оклейка, повтор идёт свободным
+    # режимом, а не с мусорными входами (урок 2026-09-25: retry по паре
+    # из «Колористики» считался wrap'ом).
     wrap_prompt = get_flow_prompt("wrap")
     stored_prompt = rows[0]["prompt"] or ""
     model = rows[0]["model"] or REPLICATE_MODEL
-    is_wrap = bool(rows[0]["flow"])
+    is_wrap = rows[0]["flow"] == "wrap"
     prompt = wrap_prompt if is_wrap else (stored_prompt or wrap_prompt)
+    provider = app_settings.get_wrap_provider()
+    # Модель из БД может быть локальной (comfy-попытка) — валидируем
+    # по текущему провайдеру.
+    if provider == "comfy" and is_wrap:
+        model = COMFY_MODEL
+    elif model and model not in SUPPORTED_SLUGS and not is_wrap:
+        raise HTTPException(status_code=400, detail=f"Модель {model} не поддерживается")
 
     target_size = imaging.image_size(contents[0][1]) if is_wrap else None
     retry_resolution = imaging.auto_resolution(target_size) if is_wrap else ""
@@ -267,7 +431,23 @@ async def retry(request_id: str):
     # Входные строки в БД НЕ дублируем: попытка ссылается на те же фото,
     # в истории новая попытка покажется только результатом.
 
-    outgoing_ids = await _run_job(
+    # ComfyUI — только для wrap (свободный режим ходит в Replicate):
+    # входы сохранены в порядке клиент, плёнка, референсы — референсы
+    # (всё после первых двух) идут судьёй в best-of-N.
+    if provider == "comfy" and is_wrap:
+        grade_refs = [data for _mime, data in contents[2:]]
+        outgoing_ids, grade = await _run_comfy_job(
+            new_request_id_value, contents, prompt, model, target_size, "wrap", grade_refs
+        )
+        return {
+            "request_id": new_request_id_value,
+            "outgoing_ids": outgoing_ids,
+            "retried_from": request_id,
+            "provider": "comfy",
+            "grade": grade,
+        }
+
+    outgoing_ids, grade = await _run_job(
         new_request_id_value,
         prompt,
         retry_aspect,
@@ -282,6 +462,7 @@ async def retry(request_id: str):
         "request_id": new_request_id_value,
         "outgoing_ids": outgoing_ids,
         "retried_from": request_id,
+        "grade": grade,
     }
 
 
@@ -312,8 +493,11 @@ async def _run_job(
     resolution: str = "",
     target_size: tuple[int, int] | None = None,
     flow: str = "",
-) -> list[int]:
-    """Загрузить входные, сабмитнуть модель, дождаться результата, сохранить."""
+) -> tuple[list[int], None]:
+    """Загрузить входные, сабмитнуть модель, дождаться результата, сохранить.
+
+    Возвращает (id исходящих, None) — пост-грейда в конвейере больше нет
+    (решение Льва, 2026-09-25: коррекция по маске делает кадр хуже)."""
     reference_urls = []
     for mime, data in contents:
         reference_urls.append(await rc.upload_file(mime, imaging.normalize_orientation(data)))
@@ -378,7 +562,15 @@ async def _run_job(
         logger.warning("provider canceled: %s", detail)
         raise HTTPException(status_code=502, detail=detail)
 
-    return await _save_outputs(payload, request_id, prompt, model, provider_request_id, target_size, flow)
+    return await _save_outputs(
+        final=payload,
+        request_id=request_id,
+        prompt=prompt,
+        model=model,
+        provider_request_id=provider_request_id,
+        target_size=target_size,
+        flow=flow,
+    )
 
 
 async def _save_outputs(
@@ -389,7 +581,7 @@ async def _save_outputs(
     provider_request_id: str | None,
     target_size: tuple[int, int] | None = None,
     flow: str = "",
-) -> list[int]:
+) -> tuple[list[int], None]:
     outputs = final.get("output") or []
     if isinstance(outputs, str):
         outputs = [outputs]
@@ -412,19 +604,48 @@ async def _save_outputs(
                     raise HTTPException(status_code=502, detail=detail)
                 content = file_resp.content
 
-            data = imaging.match_size(content, target_size)
-            row = save_image(
-                data,
-                "outgoing",
-                model=model,
-                prompt=prompt,
-                request_id=request_id,
-                mime=imaging.sniff_mime(data),
-                flow=flow,
-            )
-            logger.info(
-                "outgoing saved: id=%s, %dKB%s",
-                row["id"], len(data) // 1024, ", resized to client size" if target_size else "",
-            )
-            outgoing_ids.append(row["id"])
-    return outgoing_ids
+            row_id = _finalize_output(content, request_id, prompt, model, target_size, flow)
+            outgoing_ids.append(row_id)
+    return outgoing_ids, None
+
+
+def _finalize_output(
+    content: bytes,
+    request_id: str,
+    prompt: str,
+    model: str,
+    target_size: tuple[int, int] | None,
+    flow: str,
+) -> int:
+    """Общий хвост обоих провайдеров (Replicate и ComfyUI): подгонка под
+    размер клиента → чистка зелёного налёта бликов → сохранение.
+    Возвращает id исходящего.
+
+    Пост-грейд цвета УДАЛЁН из конвейера (решение Льва, 2026-09-25:
+    коррекция по маске краски видна на кадре и делает результат хуже, а не
+    лучше). Чистка бликов — не цветокоррекция: только обесцвечивание
+    зелёного налёта фоновой сцены на тёмных не-окрашенных зонах кузова
+    (запрос Льва того же дня); краску и фон не трогает, сбой → кадр как был."""
+    data = imaging.match_size(content, target_size)
+    glare_pct = 0.0
+    if flow == "wrap":
+        data, glare_pct = paint_profile.clean_glare(data)
+    if glare_pct > 0:
+        logger.info("glare clean: %.1f%% кадра обесцвечено (request_id=%s)", glare_pct, request_id)
+
+    row = save_image(
+        data,
+        "outgoing",
+        model=model,
+        prompt=prompt,
+        request_id=request_id,
+        mime=imaging.sniff_mime(data),
+        flow=flow,
+    )
+    logger.info(
+        "outgoing saved: id=%s, %dKB%s",
+        row["id"],
+        len(data) // 1024,
+        ", resized to client size" if target_size else "",
+    )
+    return row["id"]

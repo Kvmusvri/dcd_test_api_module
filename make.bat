@@ -15,6 +15,9 @@ if /i "%TARGET%"=="rebuild" goto rebuild
 if /i "%TARGET%"=="dedup" goto dedup
 if /i "%TARGET%"=="models" goto models
 if /i "%TARGET%"=="clean" goto clean
+if /i "%TARGET%"=="lora" goto lora
+if /i "%TARGET%"=="lora-download" goto lora-download
+if /i "%TARGET%"=="lora-stop" goto lora-stop
 
 echo Unknown target: %TARGET%
 goto help
@@ -73,6 +76,8 @@ goto :eof
 :rebuild
 call :ensure_env
 call :ensure_models
+echo ^>^> Killing existing instances (down)...
+docker compose down
 echo ^>^> Rebuilding (incremental, cache used)...
 docker compose build
 if errorlevel 1 (
@@ -81,6 +86,28 @@ if errorlevel 1 (
 )
 docker compose up -d
 call :report
+goto :eof
+
+:lora
+call :ensure_env
+if not exist scripts\auto_lora_worker.py goto :eof
+echo ^>^> LoRA training: dataset, train ^(2400 steps, or a limit: make lora 500^), install LoRA. Ctrl+C to stop.
+.venv\Scripts\python.exe scripts\auto_lora_worker.py %2 %3 %4
+goto :eof
+
+:lora-download
+if not exist "Z:\ai-toolkit\venv\Scripts\python.exe" (
+  echo [ERROR] ai-toolkit venv not found. Run: make lora first ^(it installs it^)
+  exit /b 1
+)
+echo ^>^> Downloading Qwen-Image-Edit-2511 weights ^(40.9 GB, visible progress^)...
+"Z:\ai-toolkit\venv\Scripts\python.exe" scripts\lora_download.py
+goto :eof
+
+:lora-stop
+call :ensure_env
+if not exist .venv\Scripts\python.exe goto :eof
+.venv\Scripts\python.exe scripts\auto_lora_worker.py stop
 goto :eof
 
 :clean

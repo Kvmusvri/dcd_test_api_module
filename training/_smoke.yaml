@@ -1,0 +1,54 @@
+config:
+  name: smoke_test
+  process:
+  - datasets:
+    - cache_latents: true
+      cache_latents_to_disk: true
+      caption_dropout_rate: 0.05
+      caption_ext: txt
+      control_path:
+      - Z:\ai-toolkit\car_recolor\ctrl_car
+      - Z:\ai-toolkit\car_recolor\ctrl_film
+      folder_path: Z:\ai-toolkit\car_recolor\target
+      resolution:
+      - 512
+      - 768
+    device: cuda:0
+    model:
+      arch: qwen_image_edit_plus
+      low_vram: true
+      name_or_path: Qwen/Qwen-Image-Edit-2511
+      qtype: uint3|ostris/accuracy_recovery_adapters/qwen_image_edit_2511_torchao_uint3.safetensors
+      qtype_te: qfloat8
+      quantize: true
+      quantize_te: true
+    network:
+      linear: 16
+      linear_alpha: 16
+      type: lora
+    save:
+      dtype: float16
+      max_step_saves_to_keep: 4
+      save_every: 3
+    train:
+      # bs=1: контролы разной пропорции не склеиваются в батч (см. основной конфиг)
+      batch_size: 1
+      cache_text_embeddings: true
+      disable_sampling: true
+      dtype: bf16
+      gradient_accumulation: 1
+      gradient_checkpointing: true
+      lr: 1e-4
+      noise_scheduler: flowmatch
+      optimizer: adamw8bit
+      skip_first_sample: true
+      steps: 3
+      timestep_type: weighted
+      train_text_encoder: false
+      train_unet: true
+    training_folder: output
+    type: diffusion_trainer
+job: extension
+meta:
+  name: '[name]'
+  version: '1.0'

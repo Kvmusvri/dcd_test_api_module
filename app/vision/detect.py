@@ -25,6 +25,7 @@ CAR_CLASSES = (2, 3, 5, 7)
 PADDING = 0.06          # поле вокруг bbox, доля от стороны
 WEIGHTS_DIR = "/app/storage/ultralytics/weights"
 WEIGHTS_FILE = "yolo26m.pt"
+NO_CAR_MESSAGE = "автомобиль на фото не найден детектором"
 
 _model = None
 
@@ -47,8 +48,12 @@ def _get_model():
     return _model
 
 
-def car_crop(img: Image.Image) -> Image.Image:
-    """Кроп самого крупного автомобиля на фото (+поле). Без машины — VisionError."""
+def car_crop_box(img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Кроп самого крупного автомобиля на фото (+поле) и его бокс.
+
+    Бокс нужен стадиям, которые работают на полном кадре (пост-грейд
+    возвращает скорректированный кроп на место). Без машины — VisionError.
+    """
     model = _get_model()
     try:
         result = model.predict(np.asarray(img.convert("RGB")), verbose=False, classes=list(CAR_CLASSES))[0]
@@ -57,7 +62,7 @@ def car_crop(img: Image.Image) -> Image.Image:
 
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
-        raise VisionError("автомобиль на фото не найден детектором")
+        raise VisionError(NO_CAR_MESSAGE)
     xyxy = boxes.xyxy.cpu().numpy()
     areas = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
     x1, y1, x2, y2 = xyxy[int(np.argmax(areas))]
@@ -73,4 +78,10 @@ def car_crop(img: Image.Image) -> Image.Image:
     )
     if box[2] - box[0] < 40 or box[3] - box[1] < 40:
         raise VisionError("автомобиль найден, но слишком мал для анализа")
-    return img.crop(box)
+    return img.crop(box), box
+
+
+def car_crop(img: Image.Image) -> Image.Image:
+    """Кроп самого крупного автомобиля на фото (+поле). Без машины — VisionError."""
+    crop, _box = car_crop_box(img)
+    return crop

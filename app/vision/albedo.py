@@ -86,17 +86,12 @@ def warmup() -> None:
         logger.error("albedo warmup failed (запрос повторит попытку): %s", exc)
 
 
-def neutral_render_srgb(data: bytes) -> np.ndarray:
-    """Фото → нейтрально перезалитый кадр (sRGB uint8 того же размера).
+def _inference(data: bytes):
+    """Фото → (PIL-оригинал, словарь карт инференса на сетке INFER_SIZE).
 
-    Intrinsic возвращает albedo (hr_alb) и цветной диффузный шейдинг
-    (dif_shd), причём image ≈ albedo × shading. Прямой albedo для
-    хамелеонов теряет сигнатуру: сеть вычитает розовую подсветку углов
-    как «свет». Поэтому собираем кадр ОБРАТНО — albedo × шейдинг, где
-    шейдинг поканально нормирован к нейтральной медиане: цветовая
-    температура света сцены уходит, угловая структура и цвет плёнки
-    (включая хамелеонные зоны) остаются. Ошибки — VisionError наверх.
-    """
+    Общая точка входа в сеть: и компаратор (нейтральный рендер), и
+    пост-грейд (карта albedo) идут по одному прогону — второй Intrinsic
+    на то же фото не тратится."""
     models = _get_models()
     device = models.get("__device__", "cpu")
     try:
@@ -109,16 +104,32 @@ def neutral_render_srgb(data: bytes) -> np.ndarray:
             Image.BILINEAR,
         )
         arr = np.asarray(img_small, dtype=np.float32) / 255.0
-
         results = run_pipeline(models, arr, device=device)
-        hr_alb = results.get("hr_alb")
-        dif_shd = results.get("dif_shd")
-        if hr_alb is None or dif_shd is None:
-            raise VisionError("run_pipeline не вернул hr_alb/dif_shd")
     except VisionError:
         raise
     except Exception as exc:
         raise VisionError(f"инференс intrinsic упал: {exc}") from exc
+    return img, results
+
+
+def paint_maps(data: bytes) -> tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
+    """Фото → (PIL-оригинал, albedo линейный float32 [0..1] на сетке
+    инференса, нейтральный рендер sRGB uint8 размера фото, медиана
+    шейдинга med — линейный float (3,)).
+
+    Intrinsic возвращает albedo (hr_alb) и цветной диффузный шейдинг
+    (dif_shd), причём image ≈ albedo × shading. Нейтральный рендер
+    собирается ОБРАТНО — albedo × шейдинг, где шейдинг поканально
+    нормирован к нейтральной медиане: цветовая температура света сцены
+    уходит, угловая структура и цвет плёнки (включая хамелеонные зоны)
+    остаются. med нужен пост-грейду: коррекция прикладывается в
+    координатах нейтрального рендера (u = кадр/med), т.е. ровно там,
+    где меряет компаратор. Карта albedo — рабочая карта этапа."""
+    img, results = _inference(data)
+    hr_alb = results.get("hr_alb")
+    dif_shd = results.get("dif_shd")
+    if hr_alb is None or dif_shd is None:
+        raise VisionError("run_pipeline не вернул hr_alb/dif_shd")
 
     alb = np.asarray(hr_alb, dtype=np.float64)
     shd = np.asarray(dif_shd, dtype=np.float64)
@@ -131,4 +142,16 @@ def neutral_render_srgb(data: bytes) -> np.ndarray:
     out = Image.fromarray((srgb * 255).astype(np.uint8))
     if out.size != img.size:
         out = out.resize(img.size, Image.LANCZOS)
-    return np.asarray(out)
+    alb_lin = np.clip(np.asarray(hr_alb, dtype=np.float32), 0.0, 1.0)
+    return img, alb_lin, np.asarray(out), med.astype(np.float32)
+
+
+def neutral_render_srgb(data: bytes) -> np.ndarray:
+    """Фото → нейтрально перезалитый кадр (sRGB uint8 того же размера).
+
+    Прямой albedo для хамелеонов теряет сигнатуру: сеть вычитает розовую
+    подсветку углов как «свет». Поэтому анализ идёт по нейтральному
+    рендеру (albedo × нормированный шейдинг). Ошибки — VisionError наверх.
+    """
+    _img, _alb_lin, neutral, _med = paint_maps(data)
+    return neutral

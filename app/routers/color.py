@@ -3,30 +3,26 @@
 ЕДИНАЯ ветка исполнения (решение Льва 2026-09-20 — без fallback-веток):
 фото → нейросетевой albedo (compphoto/Intrinsic, свет сцены вычтен сетью)
 → маска кузова (U2-Net) → цвет краски (свотчи, полутона) → ΔE2000.
-Модели/веса не готовы или инференс упал → явная ошибка клиенту
-(VisionNotReady → 503 с текстом «запусти make rebuild», VisionError → 422).
+Оркестрация замера живёт в `app.services.paint_profile.measure` — той же,
+что питает пост-грейд wrap-флоу. Модели/веса не готовы или инференс упал
+→ явная ошибка клиенту (VisionNotReady → 503 с текстом «запусти make
+rebuild», VisionError → 422).
 
 Ответ для UI: CSS-остановки градиента, Lab/RGB света и тени, bbox ROI,
 кроп-превью, карты (normals/albedo), полутоновой профиль и ΔE2000.
 Свотчи рисует фронтенд — файлов результата нет.
 """
 
-import base64
-import io
 import logging
 
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from PIL import Image, ImageOps
 
 from app.config import MAX_FILE_SIZE
-from app.services import car_roi
+from app.services import paint_profile
 from app.services.colorimetry import delta_e_2000
 from app.storage import new_request_id, save_image
 from app.vision import VisionError, VisionNotReady
-from app.vision import albedo as v_albedo
-from app.vision import detect as v_detect
-from app.vision import segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -71,47 +67,18 @@ async def compare(
     request_id = new_request_id()
     logger.info("color compare: request_id=%s", request_id)
     for name, (mime, data) in payload.items():
-        save_image(data, "incoming", prompt=f"color compare {name}", request_id=request_id, mime=mime, flow="color")
+        save_image(
+            data, "incoming", prompt=f"color compare {name}",
+            request_id=request_id, mime=mime, flow="color",
+        )
 
     result = {}
     for name, (_mime, data) in payload.items():
-        # Стадия 0: YOLO-детект → кроп автомобиля (небо/стены/дорога
-        # физически не попадают в анализ).
         try:
-            img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
-            crop_img = v_detect.car_crop(img)
+            result[name] = paint_profile.measure(data)["side"]
         except (VisionNotReady, VisionError) as exc:
-            logger.error("detect failed for %s: %s", name, exc)
+            logger.error("measure failed for %s: %s", name, exc)
             raise _vision_to_http(exc, name) from exc
-        crop_buf = io.BytesIO()
-        crop_img.save(crop_buf, format="JPEG", quality=92)
-        crop_bytes = crop_buf.getvalue()
-
-        # Стадия 4: нейросетевой рендер при нейтральном свете на кропе.
-        try:
-            alb_arr = v_albedo.neutral_render_srgb(crop_bytes)
-        except (VisionNotReady, VisionError) as exc:
-            logger.error("albedo failed for %s: %s", name, exc)
-            raise _vision_to_http(exc, name) from exc
-
-        alb_img = Image.fromarray(alb_arr)
-        prev = alb_img.copy()
-        prev.thumbnail((320, 320))
-        buf = io.BytesIO()
-        prev.save(buf, format="JPEG", quality=85)
-        alb_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-        buf_full = io.BytesIO()
-        alb_img.save(buf_full, format="JPEG", quality=92)
-
-        try:
-            side = car_roi.analyze(
-                crop_bytes, buf_full.getvalue(), segment=segmentation.body_mask
-            )
-        except (VisionNotReady, VisionError) as exc:
-            logger.error("analyze failed for %s: %s", name, exc)
-            raise _vision_to_http(exc, name) from exc
-        side["albedo_preview"] = alb_uri
-        result[name] = side
 
     def lab_of(side: dict, key: str) -> np.ndarray:
         return np.array(side[key]["lab"])

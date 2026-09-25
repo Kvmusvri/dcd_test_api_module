@@ -58,7 +58,37 @@
 # удалён. Пайплайн того же дня: resolution только авто по клиентскому фото
 # (селект качества убран из UI), retry распознаёт wrap по колонке flow в БД
 # (сравнение текста промпта ломалось при каждой правке wrap.yaml).
-version: 15
+# Урок v15 → v16 (тест 2026-09-24, перекраска из другого цвета, кейс
+# «стабильно полтона светлее»): с v15 обе nano-banana (nb2 и nbp — одно
+# семейство, одна приора) СЖИМАЮТ диапазон краски: тень светлее плёнки
+# (~+3.5 L по ΔE 3.3), свет бледнее (хрома 95% от плёнки, ΔE 2.4) — глаз
+# читает связку как «высветлили». Замок v14 «не темнее и не светлее»
+# регулирует только ПЛОСКИЙ цвет ровно освещённых участков и не регулирует
+# ПЕРЕХОД тень→свет. v16: амплитуда перехода — свойство материала, учится
+# с референсов; формулировка симметричная («не сильнее и не слабее»),
+# иначе модель выполняет запрет в одну сторону (урок v13→v14). Страховка
+# того же дня — детерминированный пост-грейд по якорям референсов
+# (services/paint_profile.py), промпт и грейд работают вместе.
+# Урок v16 → v17 (тест 2026-09-24, кейс «пороги»): «painted body panels»
+# модель прочла как ВСЕ окрашенные элементы и перекрасила фиолетовые
+# акценты порогов в цвет плёнки. v17: плёнка ТОЛЬКО на панелях
+# ДОМИНАНТНОЙ краски кузова; любой элемент другого цвета/материала
+# (акценты, вставки, сплиттеры, диффузоры, молдинги) сохраняет исходный
+# цвет и финиш — нулевое влияние. Требование Льва: строго.
+# Урок v17 → v18 (тест 2026-09-24, Pro, кейс «шарики»): модель дорисовала
+# в фон красно-чёрные шарики, которых нет в фото клиента — «Do not add or
+# remove objects» оказался недостаточен. v18: перечисление усилено — сцена
+# обязана содержать ровно объекты клиентского фото, ничего нового (люди,
+# животные, декорации, шары, реквизит) и ничего не убирать. Только
+# constraints; цветовые блоки не тронуты, чтобы не конфаунднить
+# цветовые эксперименты грейда.
+# Урок v18 → v19 (тест 2026-09-24, Pro): «только доминантная краска»
+# прочитана вольно — Pro закрасил ВЕСЬ кузов, включая крышу/капот в
+# другом материале и акценты. v19: перечисление поверхностей, которые
+# не трогаются, дополнено глянечно-чёрными/карбоновыми крышей и капотом
+# (generic-типы материалов, не сцена), и добавлено правило сомнения:
+# не уверен, что панель в доминантной краске, — не трогай.
+version: 19
 order: [task, learn, apply, constraints, output]
 blocks:
   task: |
@@ -97,6 +127,11 @@ blocks:
     - How the material behaves in shadow is part of the material as well:
       check on the reference cars whether its colour holds in shade or
       deepens — and reproduce exactly that behaviour in shadow.
+    - The change of saturation from shade to light is part of the material
+      too. Compare its shaded panels with its lit panels on the reference
+      cars and learn the exact amount of that change: how much richer the
+      colour becomes where light reaches the surface, and how much it
+      quiets down in the shade.
   apply: |
     Transfer the exact behaviour you learned onto the CLIENT CAR: picture this
     material wrapped on this exact car, in this exact scene, under this exact
@@ -105,12 +140,16 @@ blocks:
     exactly as you learned it; only the car, its shape and its scene are new.
 
     The wrap REPLACES the paint completely. The CLIENT CAR's original paint
-    colour must have zero influence on the result: every painted panel becomes
-    an opaque sheet of this material showing exactly the colour you determined
+    colour must have zero influence on the result: every panel carrying the
+    car's DOMINANT body paint becomes an opaque sheet of this material
+    showing exactly the colour you determined
     — the same hue, the same lightness and the same saturation as the
     material's evenly lit areas: no darker and no lighter, no more and no less
     saturated, with no hue shift in any direction. The client car's own paint
     must not blend with, tint or show through the material in any way.
+    Surfaces that are not clearly the dominant painted body colour — roofs,
+    hoods or inserts in a different colour or material, accents, glass,
+    trim — are not part of the wrap and stay exactly as they are.
 
     Every reflection on every surface of the CLIENT CAR is computed from the
     CLIENT photo's scene only: its sky, its ground, its surroundings, its light
@@ -141,6 +180,14 @@ blocks:
     every shadowed panel of the CLIENT CAR must show exactly that: the same
     colour, only slightly darker, never a different, deeper colour.
 
+    The AMPLITUDE of the colour change from shade to light must also match
+    the reference cars exactly — the same amount of extra richness on lit
+    panels and the same amount of quieting on shaded panels, no stronger and
+    no weaker. Do not compress that span: if the references show lit panels
+    visibly richer than shaded ones, the result must show exactly that
+    difference, not a flatter one; if the references show a subtle one, keep
+    it subtle.
+
     Before rendering, check the colour: a paint chip taken from the wrapped
     panels of your result must be interchangeable with a chip taken from the
     material's evenly lit areas in the sample and reference photos. If the two
@@ -149,6 +196,14 @@ blocks:
   constraints: |
     Strict constraints:
     - Change ONLY the colour and material of the painted body panels.
+    - The material covers ONLY the panels that carry the CLIENT CAR's
+      current DOMINANT body paint. Everything else keeps its EXACT
+      original look, completely unaffected: glass of all kinds,
+      gloss-black or carbon roof, hood or lip, wheel arches, side skirts,
+      splitters, diffusers, canards, mouldings, mirror housings, badges
+      and any accent of a different colour or material must NOT be
+      wrapped or recoloured. When in doubt whether a panel carries the
+      dominant body paint, leave it unchanged.
     - Glass of every kind — windshield, windows, rear glass, headlight and
       taillight covers — must remain EXACTLY as in the client photo: same tint,
       same transparency, same reflections. Draw nothing new on glass.
@@ -159,7 +214,9 @@ blocks:
       sample or reference photos onto the client car. The client photo's own
       number plates, badges and lettering stay exactly as they are.
     - Do not change the camera angle, framing, crop, composition, perspective, background, environment, lighting, shadows or image quality in any way.
-    - Do not add or remove objects.
+    - The scene must contain exactly the objects that are present in the
+      CLIENT photo: add nothing new of any kind — no people, animals,
+      decorations, balloons, props or debris — and remove nothing.
     - Everything outside the new wrap must remain identical to the client photo.
   output: |
     - Render a photorealistic photograph of the highest sharpness and detail:

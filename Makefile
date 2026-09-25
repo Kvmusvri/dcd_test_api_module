@@ -1,9 +1,15 @@
 VENV := .venv
+# Windows: venv-питон лежит в Scripts/, на Linux — в bin/ (make из Git Bash)
+ifeq ($(OS),Windows_NT)
+PY := $(VENV)/Scripts/python.exe
+PIP := $(VENV)/Scripts/pip
+else
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
+endif
 SUDO := $(shell command -v sudo >/dev/null 2>&1 && echo sudo)
 
-.PHONY: help bootstrap setup dev up down restart logs rebuild dedup report models
+.PHONY: help bootstrap setup dev up down restart logs rebuild dedup report models lora lora-download lora-stop
 
 help:
 	@echo "make bootstrap - check/install required tools (docker, python3), fix permissions"
@@ -92,9 +98,23 @@ logs:
 	docker logs -f dcd_test
 
 rebuild: bootstrap models
+	docker compose down
 	docker compose build
 	docker compose up -d
 	@$(MAKE) --no-print-directory report
+
+# make lora       — полное обучение (2400 шагов)
+# make lora 500   — лимит шагов: число пробрасывается воркеру (см. dummy-
+#                   правило в конце файла), следующий make lora без числа
+#                   продолжит с последнего чекпойнта до 2400
+lora:
+	$(PY) scripts/auto_lora_worker.py $(filter-out lora,$(MAKECMDGOALS))
+
+lora-download:
+	Z:/ai-toolkit/venv/Scripts/python.exe scripts/lora_download.py
+
+lora-stop:
+	@$(PY) scripts/auto_lora_worker.py stop
 
 dedup: setup
 	$(PY) -m app.dedup
@@ -137,3 +157,9 @@ report:
 	else \
 		echo "[WARN] Service is not healthy after 30s. Check: make logs"; \
 	fi
+
+# Заглушка для проброса аргумента: «make lora 500» содержит цель «500»,
+# у которой нет правила — без этой заглушки make упал бы с ошибкой.
+# Явные правила приоритетнее, реальным целям она не мешает.
+%:
+	@:

@@ -1,0 +1,69 @@
+job: extension
+config:
+  # Цветовая LoRA для точной перекраски кузова (Qwen-Image-Edit-2511).
+  # Датасет: storage/lora_dataset (генерирует app/tools/build_color_lora_dataset.py).
+  # Запуск: см. training/README.md
+  name: "car_recolor_qwen_edit_2511_v1"
+  process:
+    - type: 'diffusion_trainer'
+      training_folder: "output"
+      device: cuda:0
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        # Имена файлов попарно совпадают (img_0001.jpg), размер/пропорции могут отличаться
+        - folder_path: "Z:\\ai-toolkit\\car_recolor\\target"
+          control_path:
+            - "Z:\\ai-toolkit\\car_recolor\\ctrl_car"
+            - "Z:\\ai-toolkit\\car_recolor\\ctrl_film"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          # 1024 убран: ради задачи «точный цвет» он не нужен (выход всё
+          # равно дотягивается до клиентского размера), а шаги на 1024 —
+          # самые дорогие. Ускорение ~2-3x.
+          resolution: [512, 768]
+          # Кэш латентов: VAE-кодирование один раз, а не на каждом шаге
+          # (официальный 24GB-конфиг идёт с этими ключами).
+          cache_latents: true
+          cache_latents_to_disk: true
+      train:
+        # Батч строго 1. У qwen_image_edit_plus каждый контрол ресайзится
+        # на площадь 1024x1024 по СВОИМ пропорциям (та же логика в ноде
+        # TextEncodeQwenImageEditPlus на инференсе), поэтому длина
+        # токен-последовательности у каждой пары своя — батч из двух разных
+        # пар не склеивается в torch.cat (краш на шаге 0, 2026-09-25).
+        batch_size: 1
+        cache_text_embeddings: true   # обязательно для 24GB
+        # 250 пар × ~9.6 эпох = те же 2400 сэмплов, что давал батч 2 × 1200
+        # шагов; на батче 1 шаг ~вдвое дешевле, так что по времени сопоставимо.
+        # Чекпойнты каждые 250 (хранятся последние 4).
+        steps: 2400
+        gradient_accumulation: 1
+        timestep_type: "weighted"
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        skip_first_sample: true
+        disable_sampling: true        # экономим VRAM на 24GB
+        dtype: bf16
+      model:
+        name_or_path: "Qwen/Qwen-Image-Edit-2511"
+        arch: "qwen_image_edit_plus"
+        quantize: true
+        # uint3 + ARA-адаптер: сохраняет качество при 3-битном квантовании (Ostris)
+        qtype: "uint3|ostris/accuracy_recovery_adapters/qwen_image_edit_2511_torchao_uint3.safetensors"
+        quantize_te: true
+        qtype_te: "qfloat8"
+        low_vram: true
+meta:
+  name: "[name]"
+  version: '1.0'

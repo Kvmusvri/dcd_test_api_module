@@ -47,9 +47,14 @@
         </div>
       </div>
 
+      <select id="provider" class="model-select" aria-label="Провайдер генерации">
+        <option value="replicate">Replicate · Nano Banana (платно)</option>
+        <option value="comfy">ComfyUI · Qwen-Image-Edit (локально)</option>
+      </select>
       <select id="model" class="model-select" aria-label="Модель"></select>
       <button class="btn" id="generate-btn" disabled>Сгенерировать</button>
       <button class="btn btn-secondary" id="retry-btn" hidden>Повторить последнюю попытку</button>
+      <p class="hint" id="provider-hint" hidden></p>
       <p class="hint" id="client-hint" hidden></p>
       <p class="error" id="gen-error" hidden></p>
     </section>

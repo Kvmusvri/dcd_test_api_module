@@ -34,6 +34,27 @@ def linear_to_lab(lin: np.ndarray) -> np.ndarray:
     return np.stack([lightness, a, b], axis=-1)
 
 
+def lab_to_linear(lab: np.ndarray) -> np.ndarray:
+    """CIE Lab (D65, (..., 3)) → линейный RGB, без 8-битного квантования."""
+    lab = np.asarray(lab, dtype=np.float64)
+    fy = (lab[..., 0] + 16.0) / 116.0
+    fx = fy + lab[..., 1] / 500.0
+    fz = fy - lab[..., 2] / 200.0
+
+    def f_inv(f: np.ndarray) -> np.ndarray:
+        t = f**3
+        return np.where(t > 0.008856, t, (f - 16.0 / 116.0) / 7.787)
+
+    xyz = np.stack([f_inv(fx), f_inv(fy), f_inv(fz)], axis=-1) * _WHITE_D65
+    return xyz @ _M_XYZ_TO_RGB.T
+
+
+def linear_to_srgb(lin: np.ndarray) -> np.ndarray:
+    """Линейный RGB → sRGB 0..1 (гамма sRGB, с линейным участком)."""
+    lin = np.clip(lin, 0.0, None)
+    return np.where(lin <= 0.0031308, lin * 12.92, 1.055 * lin ** (1 / 2.4) - 0.055)
+
+
 def srgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     """sRGB (0..255, любой shape (..., 3)) → CIE Lab (D65)."""
     c = rgb.astype(np.float64) / 255.0

@@ -8,6 +8,8 @@ services:
       - .env
     volumes:
       - ./storage:/app/storage
+      # Каталог плёнок (для датасета цветовой LoRA) — read-only.
+      - "C:/Users/Blake/Desktop/telegram_skincars/bot_catalog:/app/storage/lora_catalog:ro"
     gpus: all
     restart: unless-stopped
     healthcheck:
@@ -16,3 +18,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+
+  # ComfyUI (локальная генерация) — НЕ контейнер: биндинг Docker Desktop
+  # не читает файлы с Z: выше 4 ГиБ (HostBuffer.read_file_slice failed,
+  # 2026-09-24), а модели на Z:. Живёт на хосте с жизненным циклом через
+  # make: scripts/comfy_service.py (rebuild/up -> start, down -> stop).

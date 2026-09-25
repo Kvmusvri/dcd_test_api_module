@@ -269,12 +269,36 @@ function renderResults(data) {
   $("results-empty").hidden = data.outgoing_ids.length > 0;
   const grid = $("results-grid");
   data.outgoing_ids.forEach((id) => {
+    const cell = document.createElement("figure");
+    cell.className = "result";
     const img = document.createElement("img");
     img.src = `/api/images/${id}/file`;
     img.alt = "результат генерации";
     img.loading = "lazy";
     img.addEventListener("click", () => window.open(img.src, "_blank"));
-    grid.prepend(img);
+    cell.append(img);
+    const grade = data.grade && data.grade[String(id)];
+    if (grade) {
+      const cap = document.createElement("figcaption");
+      if (grade.status === "applied") {
+        const b = grade.before, a = grade.after;
+        cap.textContent = a
+          ? `цвет притянут к плёнке · ΔE тень ${b.shadow_de}→${a.shadow_de}, свет ${b.lit_de}→${a.lit_de}`
+          : `цвет притянут к плёнке · ΔE до правки: тень ${b.shadow_de}, свет ${b.lit_de}`;
+        cap.title =
+          `генерация: тень rgb(${grade.gen.shadow_rgb.join(", ")}), свет rgb(${grade.gen.lit_rgb.join(", ")})\n` +
+          `плёнка (референсы: ${grade.references_used}/${grade.references_total}): ` +
+          `тень rgb(${grade.film.shadow_rgb.join(", ")}), свет rgb(${grade.film.lit_rgb.join(", ")})` +
+          (grade.refs_spread_de != null ? `\nразброс референсов: ΔE ${grade.refs_spread_de}` : "") +
+          (grade.graded
+            ? `\nрезультат: тень rgb(${grade.graded.shadow_rgb.join(", ")}), свет rgb(${grade.graded.lit_rgb.join(", ")})`
+            : "");
+      } else {
+        cap.textContent = `без цветокоррекции: ${grade.reason || "причина не указана"}`;
+      }
+      cell.append(cap);
+    }
+    grid.prepend(cell);
   });
 }
 
@@ -400,6 +424,61 @@ function switchTab(tab) {
 document.querySelectorAll(".tab").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.tab))
 );
+
+/* ---------- Провайдер: выбор генератора прямо в оклейке ---------- */
+
+function applyProviderUI(provider) {
+  const model = $("model");
+  if (provider === "comfy") {
+    model.replaceChildren();
+    const opt = document.createElement("option");
+    opt.value = "qwen-image-edit-2511";
+    opt.textContent = "Qwen-Image-Edit-2511 (локально)";
+    model.append(opt);
+    model.disabled = true;
+  } else {
+    model.disabled = false;
+    loadModels();
+  }
+}
+
+async function initProvider() {
+  const select = $("provider");
+  const hint = $("provider-hint");
+  try {
+    const res = await fetch("/api/replicate/provider");
+    const data = await res.json();
+    select.value = data.provider;
+    applyProviderUI(data.provider);
+    hint.textContent = data.comfy_alive
+      ? "ComfyUI отвечает."
+      : "ComfyUI сейчас не отвечает — локальная генерация вернёт ошибку.";
+    hint.hidden = false;
+  } catch {
+    hint.textContent = "Нет связи с сервером.";
+    hint.hidden = false;
+  }
+}
+
+$("provider").addEventListener("change", async () => {
+  const select = $("provider");
+  const hint = $("provider-hint");
+  hint.hidden = false;
+  hint.textContent = "Сохраняю…";
+  try {
+    const body = new FormData();
+    body.append("provider", select.value);
+    const res = await fetch("/api/replicate/provider", { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `Ошибка ${res.status}`);
+    applyProviderUI(data.provider);
+    hint.textContent = data.comfy_alive
+      ? "ComfyUI отвечает."
+      : "ComfyUI сейчас не отвечает — локальная генерация вернёт ошибку.";
+  } catch (err) {
+    hint.textContent = `Ошибка: ${err.message}`;
+  }
+});
 
 /* ---------- Колористика: сравнение цвета кузова на двух фото ---------- */
 
@@ -654,3 +733,4 @@ loadKeyStatus();
 loadDates();
 loadRetryButton();
 loadModels();
+initProvider();

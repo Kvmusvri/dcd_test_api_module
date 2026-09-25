@@ -158,6 +158,13 @@ def _vision_maps(
     span = max(hi - lo, 1e-6)
     l_norm = np.clip((lightness - lo) / span * 100.0, 0.0, 100.0)
 
+    # Карта полутоновой позиции (0–100) для ВСЕХ пикселей albedo — рабочая
+    # карта грейда: тот же p3–p97-нормализованный ход светлоты, в котором
+    # измерены бины, поэтому нанесение попадает ровно в систему замера
+    # (замер = нанесение). Вне маски значения не используются.
+    l_all = linear_to_lab(albedo_lin)[..., 0]
+    tone_pos = np.clip((l_all - lo) / span * 100.0, 0.0, 100.0).astype(np.float32)
+
     bin_w = 100.0 / TONE_BIN_COUNT
     for b in range(TONE_BIN_COUNT):
         sel = (l_norm >= b * bin_w) & (l_norm < (b + 1) * bin_w)
@@ -175,6 +182,7 @@ def _vision_maps(
 
     return {
         "tone_bins": tone_bins,
+        "tone_pos": tone_pos,
         "maps": {
             "normals": _jpeg_uri(v_normals.normals_preview(normals)),
             "albedo": _jpeg_uri(Image.fromarray((albedo_vis * 255).astype(np.uint8))),
@@ -182,14 +190,48 @@ def _vision_maps(
     }
 
 
-def analyze(data: bytes, albedo_data: bytes, segment) -> dict:
-    """Оригинал + albedo → маска кузова → цвет краски (свотчи, полутона) + карты.
+# Ключи ответа компаратора (JSON-безопасные); остальное analyze_full
+# отдаёт только внутренним потребителям (пост-грейд).
+RESPONSE_KEYS = ("coverage_pct", "bbox", "stops", "lit", "shadow", "vision", "crop")
+# Единый гейт набора краски (замер = нанесение — контур «измерили →
+# исправили» обязан работать с одними и теми же пикселями): при
+# хроматичной краске из набора выбрасываются серые пиксели (хром,
+# отражения неба в кузове; хрома < доля от медианной) и пиксели чужого
+# ОТТЕНКА — акценты/вставки другого цвета (кейс 2026-09-24: фиолетовые
+# пороги, оставленные промптом нетронутыми, подмешивались в якоря
+# замера и держали ΔE тени ~2+ даже после коррекции).
+GRADE_CHROMA_GATE = 0.25
+# Окно доминирующего оттенка: мода круговой гистограммы оттенков
+# (вес = хрома) ± эта дуга. У хамелеонов ход оттенка обычно в её
+# пределах; заведомо чужие цвета (фиолетовый 300° против красного 35°)
+# отсекаются с запасом.
+MEASURE_HUE_KEEP_DEG = 40.0
 
-    segment — callable PIL.Image → bool-маска (vision.segmentation.body_mask).
-    Маска строится по ОРИГИНАЛЬНОМУ фото (albedo перекрашивает весь кадр —
-    небо/стены — и сегментация по нему цепляет фон, урок Льва 2026-09-21),
-    цвет краски — по albedo (свет вычтен сетью). Маска обязательна: фото без
-    опознанного автомобиля — VisionError.
+
+def _circ_dist(hues: np.ndarray, center: float) -> np.ndarray:
+    """Круговое расстояние до центра в градусах (без заворота через 180°)."""
+    return np.abs((hues - center + 180.0) % 360.0 - 180.0)
+
+
+def _dominant_hue(hues: np.ndarray, weights: np.ndarray) -> float:
+    """Доминирующий оттенок набора: мода круговой гистограммы (бины 15°,
+    сглаживание кольцом), вес пикселя = хрома — краска перекрывает акценты."""
+    edges = np.arange(-180.0, 181.0, 15.0)
+    idx = np.clip(np.digitize(hues, edges) - 1, 0, len(edges) - 2)
+    hist = np.zeros(len(edges) - 1, dtype=np.float64)
+    np.add.at(hist, idx, weights)
+    hist = np.convolve(np.r_[hist[-1:], hist, hist[:1]], [0.25, 0.5, 0.25], mode="valid")
+    k = int(np.argmax(hist))
+    return float((edges[k] + edges[k + 1]) / 2.0)
+
+
+def analyze_full(data: bytes, albedo_data: bytes, segment) -> dict:
+    """Оригинал + albedo → маска кузова → цвет краски + карты + маска краски.
+
+    Как analyze (см. ниже), плюс внутренние поля для пост-грейда:
+    paint_mask — 2D bool-маска краски на сетке анализа (кузов минус
+    колёса/стёкла, при хроматичной краске минус серые пиксели),
+    paint_chroma — медианная хрома краски, work_size — размер сетки.
     """
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img).convert("RGB")
@@ -213,11 +255,31 @@ def analyze(data: bytes, albedo_data: bytes, segment) -> dict:
     # Краска = маска минус тёмный не-окрашенный хвост (колёса/стёкла).
     keep = _paint_only(corrected[:, 0])
     corrected = corrected[keep]
+    kept_flat = np.flatnonzero(mask.reshape(-1))[keep]
+
+    # Единый гейт набора краски (см. константы): при хроматичной краске
+    # серые пиксели и пиксели чужого оттенка выбрасываются ОДНОВРЕМЕННО
+    # из замера и из маски нанесения — измеряем ровно то, что красим.
+    # Ахроматичные плёнки (серые/чёрные) гейтом не трогаются.
+    chroma_kept = np.hypot(corrected[:, 1], corrected[:, 2])
+    chroma_median = float(np.median(chroma_kept)) if len(chroma_kept) else 0.0
+    if chroma_median >= CHROMA_SATURATED:
+        hues = np.degrees(np.arctan2(corrected[:, 2], corrected[:, 1]))
+        gate = (chroma_kept >= GRADE_CHROMA_GATE * chroma_median) & (
+            _circ_dist(hues, _dominant_hue(hues, chroma_kept)) <= MEASURE_HUE_KEEP_DEG
+        )
+        if int(gate.sum()) >= 100:
+            corrected = corrected[gate]
+            kept_flat = kept_flat[gate]
+
     corrected = corrected[np.argsort(corrected[:, 0])]
     n = len(corrected)
 
     shadow = _band_color(corrected, *SHADOW_BAND)
     lit = _band_color(corrected, *LIT_BAND)
+
+    paint_mask = np.zeros(mask.shape, dtype=bool)
+    paint_mask.reshape(-1)[kept_flat] = True
 
     # Градиент «тень → свет»: цвет краски в полосах перцентилей светлоты
     # albedo — у хамелеона это собственное изменение цвета плёнки.
@@ -237,6 +299,7 @@ def analyze(data: bytes, albedo_data: bytes, segment) -> dict:
     except Exception:
         logger.exception("vision maps failed")
         raise VisionError("не удалось построить карты нормалей/albedo")
+    tone_pos = vision.pop("tone_pos")
 
     # bbox маски (перцентили отбрасывают одиночные выбросы) → координаты оригинала.
     ys, xs = np.nonzero(mask)
@@ -264,4 +327,22 @@ def analyze(data: bytes, albedo_data: bytes, segment) -> dict:
         "shadow": {"lab": [round(v, 1) for v in shadow], "rgb": lab_to_srgb_scalar(shadow)},
         "vision": vision,
         "crop": crop_uri,
+        # внутренние поля (в ответ компаратора не попадают — см. analyze)
+        "paint_mask": paint_mask,
+        "tone_pos": tone_pos,
+        "paint_chroma": round(chroma_median, 1),
+        "work_size": small.size,
     }
+
+
+def analyze(data: bytes, albedo_data: bytes, segment) -> dict:
+    """Оригинал + albedo → маска кузова → цвет краски (свотчи, полутона) + карты.
+
+    segment — callable PIL.Image → bool-маска (vision.segmentation.body_mask).
+    Маска строится по ОРИГИНАЛЬНОМУ фото (albedo перекрашивает весь кадр —
+    небо/стены — и сегментация по нему цепляет фон, урок Льва 2026-09-21),
+    цвет краски — по albedo (свет вычтен сетью). Маска обязательна: фото без
+    опознанного автомобиля — VisionError.
+    """
+    full = analyze_full(data, albedo_data, segment)
+    return {key: full[key] for key in RESPONSE_KEYS}

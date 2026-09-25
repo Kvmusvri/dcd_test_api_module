@@ -1,6 +1,9 @@
+import asyncio
 import hashlib
 import logging
 import logging.handlers
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,6 +18,10 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 LOG_DIR = BASE_DIR / "storage" / "logs"
 
 logger = logging.getLogger(__name__)
+
+# Живые фоновые задачи держим по ссылке: event loop держит таски слабо,
+# собранный GC-ом таск тихо умирал бы посреди генерации датасета.
+_BACKGROUND_TASKS: set = set()
 
 
 def setup_logging() -> None:
@@ -42,6 +49,41 @@ def setup_logging() -> None:
 setup_logging()
 
 
+def _autogen_lora_dataset() -> None:
+    """Первичная генерация датасета цветовой LoRA (фоном, один раз).
+
+    Каталог плёнок монтируется ro из compose; датасет пишется в storage.
+    Скип — по маркеру COMPLETE (metadata.jsonl растёт инкрементально).
+    Прерванная генерация продолжается (--resume), не с нуля."""
+    try:
+        from app import config
+
+        catalog, dataset = config.LORA_CATALOG_DIR, config.LORA_DATASET_DIR
+        if not catalog.is_dir() or not any(catalog.iterdir()):
+            logger.info("lora dataset: каталог плёнок не смонтирован (%s) — пропускаю", catalog)
+            return
+        if (dataset / "COMPLETE").exists():
+            logger.info("lora dataset: уже готов (%s) — пропускаю", dataset)
+            return
+        cmd = [
+            sys.executable, "-m", "app.tools.build_color_lora_dataset",
+            "--catalog", str(catalog), "--out", str(dataset),
+        ]
+        if (dataset / "metadata.jsonl").exists():
+            cmd.append("--resume")
+        logger.info("lora dataset: старт генерации (%s -> %s), только реальные пары (CPU, минуты)", catalog, dataset)
+        result = subprocess.run(cmd, check=False, cwd=str(config.BASE_DIR))
+        if result.returncode == 0 and (dataset / "COMPLETE").exists():
+            logger.info("lora dataset: генерация завершена (%s)", dataset)
+        else:
+            logger.error(
+                "lora dataset: генерация не завершилась (rc=%s) — продолжится при следующем старте",
+                result.returncode,
+            )
+    except Exception:
+        logger.exception("lora dataset autogen failed")
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     init_db()
@@ -54,6 +96,11 @@ async def lifespan(application: FastAPI):
         v_albedo.warmup()
     except Exception:
         logger.exception("albedo warmup crashed at startup")
+    # Датасет цветовой LoRA — фоном после warmup (GPU занят подольше,
+    # но сервис работает); хостовый диспетчер (make rebuild) подхватит.
+    task = asyncio.create_task(asyncio.to_thread(_autogen_lora_dataset))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     yield
     logger.info("shutdown")
 
