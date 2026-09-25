@@ -355,10 +355,24 @@ def clean_glare(data: bytes) -> tuple[bytes, float]:
         hue[m] = (r - g)[m] / c[m] + 4.0
         hue *= 60.0
 
+        # Если кузов сам зелёный (зелёная плёнка) — чистка уничтожит
+        # краску: «налёт» неотличим от основного цвета. Признак — зелёная
+        # хрома доминирует среди хроматичных пикселей кузова.
+        chroma_mask = (sat >= 0.2) & mask
+        green_zone = (hue >= GLARE_HUE_LO) & (hue <= GLARE_HUE_HI)
+        body_chroma = int(chroma_mask.sum())
+        if body_chroma:
+            green_share = float((green_zone & chroma_mask).sum()) / body_chroma
+            if green_share > 0.5:
+                logger.info(
+                    "glare clean skipped: кузов сам зелёный (зелёная хрома %.0f%%)",
+                    green_share * 100,
+                )
+                return data, 0.0
+
         gate = (
             mask
-            & (hue >= GLARE_HUE_LO)
-            & (hue <= GLARE_HUE_HI)
+            & green_zone
             & (sat >= GLARE_MIN_SAT)
             & (mx <= GLARE_MAX_VAL)
         )
